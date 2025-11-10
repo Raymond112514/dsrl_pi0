@@ -34,6 +34,10 @@ from jaxrl2.networks.values import StateActionEnsemble
 from jaxrl2.types import Params, PRNGKey
 from jaxrl2.utils.target_update import soft_target_update
 
+import sys
+sys.path.append('/home/raymond112514/dsrl_pi0/examples/classifier')
+from classifier import Classifier
+
 
 class TrainState(train_state.TrainState):
     batch_stats: Any
@@ -123,7 +127,8 @@ class PixelSACLearner(Agent):
                  num_qs: int = 2,
                  target_entropy: float = None,
                  action_magnitude: float = 1.0,
-                 num_cameras: int = 1
+                 num_cameras: int = 1,
+                 classifier: Optional[Classifier] = None
                  ):
         """
         An implementation of the version of Soft-Actor-Critic described in https://arxiv.org/abs/1812.05905
@@ -241,11 +246,11 @@ class PixelSACLearner(Agent):
         self._temp = new_temp
         return info
 
-    def perform_eval(self, variant, i, wandb_logger, eval_buffer, eval_buffer_iterator, eval_env):
+    def perform_eval(self, variant, i, wandb_logger, eval_buffer, eval_buffer_iterator, eval_env, classifier):
         from examples.train_utils_sim import make_multiple_value_reward_visulizations
-        make_multiple_value_reward_visulizations(self, variant, i, eval_buffer, wandb_logger)
+        make_multiple_value_reward_visulizations(self, variant, i, eval_buffer, wandb_logger, classifier)
 
-    def make_value_reward_visulization(self, variant, trajs):
+    def make_value_reward_visulization(self, variant, trajs, shaped_rewards=None):
         num_traj = len(trajs['rewards'])
         traj_images = []
 
@@ -253,7 +258,8 @@ class PixelSACLearner(Agent):
             observations = trajs['observations'][itraj]
             next_observations = trajs['next_observations'][itraj]
             actions = trajs['actions'][itraj]
-            rewards = trajs['rewards'][itraj]
+            orig_rewards = trajs['rewards'][itraj]
+            rewards = orig_rewards
             masks = trajs['masks'][itraj]
 
             q_pred = []
@@ -275,6 +281,13 @@ class PixelSACLearner(Agent):
                 q_value = get_value(action, obs_dict, self._critic)
                 q_pred.append(q_value)
 
+            if shaped_rewards is not None:
+                # Accept a list/sequence of per-trajectory rewards or a single array
+                try:
+                    rewards = shaped_rewards[itraj]
+                except (TypeError, IndexError, KeyError):
+                    rewards = shaped_rewards
+            rewards = np.asarray(rewards).squeeze()
             traj_images.append(make_visual(q_pred, rewards, masks, observations['pixels']))
         print('finished reward value visuals.')
         return np.concatenate(traj_images, 0)

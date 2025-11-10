@@ -5,6 +5,15 @@ xla_flags = os.environ.get('XLA_FLAGS', '')
 xla_flags += ' --xla_gpu_triton_gemm_any=True'
 os.environ['XLA_FLAGS'] = xla_flags
 
+import sys
+sys.path.append('/home/raymond112514/dsrl_pi0')
+sys.path.append('/home/raymond112514/LIBERO')
+sys.path.append('/home/raymond112514/dsrl_pi0/openpi')
+sys.path.append('/home/raymond112514/dsrl_pi0/openpi/src')
+sys.path.append('/home/raymond112514/dsrl_pi0/examples/classifier')
+
+from buffer import LabelBuffer
+from classifier import Classifier
 import pathlib, copy
 
 import jax
@@ -75,6 +84,12 @@ class DummyEnv(gym.ObservationWrapper):
         self.observation_space = Dict(obs_dict)
         self.action_space = Box(low=-1, high=1, shape=(1, 32,), dtype=np.float32) # 32 is the noise action space of pi 0
 
+def build_exp_name(variant):
+    if variant.use_classifier:
+        exp_name = f"task{variant.task_id}_{variant.classifier_encoder_type}_rs{variant.reward_scale}_uf{variant.classifier_update_freq}"
+    else:
+        exp_name = f"task{variant.task_id}"
+    return exp_name + f"_seed{variant.seed}"
 
 def main(variant):
     devices = jax.local_devices()
@@ -97,10 +112,12 @@ def main(variant):
         import uuid
         variant.prefix = str(uuid.uuid4().fields[-1])[:5]
 
-    if variant.suffix:
-        expname = create_exp_name(variant.prefix, seed=variant.seed) + f"_{variant.suffix}"
-    else:
-        expname = create_exp_name(variant.prefix, seed=variant.seed)
+    # if variant.suffix:
+    #     expname = create_exp_name(variant.prefix, seed=variant.seed) + f"_{variant.suffix}"
+    # else:
+    #     expname = create_exp_name(variant.prefix, seed=variant.seed)
+    
+    expname = build_exp_name(variant)
    
     outputdir = os.path.join(os.environ['EXP'], expname)
     variant.outputdir = outputdir
@@ -111,7 +128,7 @@ def main(variant):
     if variant.env == 'libero':
         benchmark_dict = benchmark.get_benchmark_dict()
         task_suite = benchmark_dict["libero_90"]()
-        task_id = 57
+        task_id = variant.task_id
         task = task_suite.get_task(task_id)
         env, task_description = _get_libero_env(task, 256, variant.seed)
         eval_env = env
@@ -135,7 +152,7 @@ def main(variant):
 
     group_name = variant.prefix + '_' + variant.launch_group_id
     wandb_output_dir = tempfile.mkdtemp()
-    wandb_logger = WandBLogger(variant.prefix != '', variant, variant.wandb_project, experiment_id=expname, output_dir=wandb_output_dir, group_name=group_name)
+    wandb_logger = WandBLogger(variant.prefix != '', variant, "dsrl_pi0_shaped", experiment_id=expname, output_dir=wandb_output_dir, group_name=group_name)
 
     dummy_env = DummyEnv(variant)
     sample_obs = add_batch_dim(dummy_env.observation_space.sample())
@@ -143,6 +160,11 @@ def main(variant):
     print('sample obs shapes', [(k, v.shape) for k, v in sample_obs.items()])
     print('sample action shape', sample_action.shape)
     
+    if variant.use_classifier:
+        classifier = Classifier(encoder_type=variant.classifier_encoder_type)
+        buffer = LabelBuffer()
+    else:
+        classifier = buffer = None
 
     if variant.env == 'libero':
         config = openpi_config.get_config("pi0_libero")
@@ -154,11 +176,11 @@ def main(variant):
         raise NotImplementedError()
     agent_dp = policy_config.create_trained_policy(config, checkpoint_dir)
     print("Loaded pi0 policy from %s", checkpoint_dir)
-    agent = PixelSACLearner(variant.seed, sample_obs, sample_action, **kwargs)
+    agent = PixelSACLearner(variant.seed, sample_obs, sample_action, **kwargs, classifier=classifier)
 
     online_buffer_size = variant.max_steps  // variant.multi_grad_step
     online_replay_buffer = ReplayBuffer(dummy_env.observation_space, dummy_env.action_space, int(online_buffer_size))
     replay_buffer = online_replay_buffer
     replay_buffer.seed(variant.seed)
-    trajwise_alternating_training_loop(variant, agent, env, eval_env, online_replay_buffer, replay_buffer, wandb_logger, shard_fn=shard_fn, agent_dp=agent_dp)
+    trajwise_alternating_training_loop(variant, agent, env, eval_env, online_replay_buffer, replay_buffer, wandb_logger, shard_fn=shard_fn, agent_dp=agent_dp, classifier=classifier, buffer=buffer)
  

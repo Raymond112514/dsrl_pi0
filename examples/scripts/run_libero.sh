@@ -21,7 +21,7 @@ python3 examples/launch_train_sim.py \
 --wandb_project ${proj_name} \
 --batch_size 256 \
 --discount 0.999 \
---seed 0 \
+--seed 10 \
 --max_steps 500000  \
 --eval_interval 10000 \
 --log_interval 500 \
@@ -32,3 +32,7 @@ python3 examples/launch_train_sim.py \
 --action_magnitude 1.0 \
 --query_freq 20 \
 --hidden_dims 128 \
+--use_classifier true \
+--classifier_encoder_type resnet \
+--classifier_update_freq 100 \
+--reward_scale 0.25 \
