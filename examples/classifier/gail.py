@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from encoder import Encoder
 
-class Classifier(nn.Module):
+class GailClassifier(nn.Module):
     def __init__(self,
                  encoder_type: str = "resnet",
                  obs_dim=520,
@@ -11,8 +11,8 @@ class Classifier(nn.Module):
                  hidden_dim=256,
                  num_layers=2,
                  lr=1e-5,
-                 classifier_type="default"):
-        super(Classifier, self).__init__()
+                 classifier_type="gail"):
+        super(GailClassifier, self).__init__()
         self.obs_dim = obs_dim
         self.action_dim = action_dim
         self.hidden_dim = hidden_dim
@@ -59,19 +59,4 @@ class Classifier(nn.Module):
         self.eval()
         logits = self.forward(state, pixel, action).squeeze(-1)
         logits = torch.clamp(logits, -20, 20)
-        if self.classifier_type == "log_prob":
-            logits = -F.softplus(-logits)
-            return logits
-        elif self.classifier_type == "gail":
-            return F.softplus(logits)
-        elif self.classifier_type == "prob":
-            logits = torch.sigmoid(logits)
-            return torch.clamp(logits, -20, 20)
-        elif self.classifier_type == "quotient":
-            logits = torch.sigmoid(logits)
-            return torch.clamp(logits / (1 - logits + 1e-6), -20, 20)
-        elif self.classifier_type == "half":
-            p = torch.sigmoid(logits)
-            return torch.clamp(-torch.log(1 - p + 1e-6), -20, 20)
-        else:
-            return logits
+        return torch.clamp(F.softplus(logits), -20, 20)

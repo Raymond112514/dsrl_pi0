@@ -103,7 +103,7 @@ class WandBLogger(object):
                 config=variant,
                 project=project,
                 dir=output_dir,
-                id=experiment_id,
+                name=experiment_id,
                 settings=wandb.Settings(start_method="thread"),
                 group=group_name,
                 entity=team

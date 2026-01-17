@@ -7,7 +7,7 @@ import math
 import PIL
 
 import sys
-sys.path.append('/home/raymond112514/dsrl_pi0/examples/classifier')
+sys.path.append('/global/home/users/r112358/dsrl_pi0/examples/classifier')
 from buffer import LabelBuffer
 from classifier import Classifier
 import jax.numpy as jnp
@@ -113,6 +113,7 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
     update_classifier_time = 0
     validate_classifier_time = 0
     classifier_n_updates = 0
+    num_traj = 0
     wandb_logger.log({'num_online_samples': 0}, step=i)
     wandb_logger.log({'num_online_trajs': 0}, step=i)
     wandb_logger.log({'env_steps': 0}, step=i)
@@ -120,10 +121,18 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
     with tqdm(total=variant.max_steps, initial=0) as pbar:
         while i <= variant.max_steps:
             traj = collect_traj(variant, agent, env, i, agent_dp)
+            num_traj += 1
             traj_id = online_replay_buffer._traj_counter
             add_online_data_to_buffer(variant, traj, online_replay_buffer)
             if buffer is not None:
-                add_to_classifier_buffer(variant, traj, buffer, classifier)
+                if variant.shaping_type in ["default", "rnd"]:
+                    add_to_classifier_buffer(variant, traj, buffer, classifier)
+                if variant.shaping_type == "gail":
+                    if num_traj < 20:
+                        print(f"Adding initial rollouts: {num_traj}")
+                        add_to_classifier_buffer_gail(variant, traj, buffer, classifier, initial=True)
+                    else:
+                        add_to_classifier_buffer_gail(variant, traj, buffer, classifier, initial=False)
             total_env_steps += traj['env_steps']
             print('online buffer timesteps length:', len(online_replay_buffer))
             print('online buffer num traj:', traj_id + 1)
@@ -141,7 +150,10 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
             else:
                 num_gradsteps = len(traj["rewards"])*variant.multi_grad_step
 
-            if len(online_replay_buffer) > variant.start_online_updates:
+            if num_traj == 20:
+                print(f"Number of success: {num_traj}")
+
+            if num_traj >= 20:
                 print_green(f"Updating time at {i}")
                 update_classifier_time = i if update_classifier_time == 0 else update_classifier_time
                 validate_classifier_time = i if validate_classifier_time == 0 else validate_classifier_time
@@ -254,6 +266,25 @@ def add_to_classifier_buffer(variant, traj, buffer, classifier):
     print(f"Is success: {is_success}")
     print(f"Label buffer length: {len(buffer)}")
             
+def add_to_classifier_buffer_gail(variant, traj, buffer, classifier, initial):
+    actions = np.array(traj['actions'])
+    episode_len = len(actions)
+    rewards = np.array(traj['rewards'])
+    is_success = int(np.any(rewards == 0))
+    pixels = np.stack([traj['observations'][t]['pixels'].squeeze(0).squeeze(-1) for t in range(episode_len)], axis=0)
+    states = np.stack([traj['observations'][t]['state'].squeeze(0).squeeze(-1) for t in range(episode_len)], axis=0)
+    for t in range(episode_len):
+        state = states[t]
+        pixel = pixels[t]
+        action = actions[t].reshape(-1)
+        if initial and is_success:
+            print(f"Adding success transitions: {is_success}")
+            buffer.add(state, pixel, action, 1)
+        if not initial:
+            print(f"Adding fail transitions: {is_success}")
+            buffer.add(state, pixel, action, 0)
+    print(f"Label buffer length: {len(buffer)}")
+
 def add_online_data_to_buffer(variant, traj, online_replay_buffer):
 
     discount_horizon = variant.query_freq
@@ -470,7 +501,7 @@ def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None):
                 
         print(f'Rollout {rollout_id} : {episode_return=}, Success: {is_success}')
         video = np.stack(image_list).transpose(0, 3, 1, 2)
-        wandb_logger.log({f'eval_video/{rollout_id}': wandb.Video(video, fps=50)}, step=i)
+        #wandb_logger.log({f'eval_video/{rollout_id}': wandb.Video(video, fps=50)}, step=i)
 
 
     success_rate = np.mean(np.array(success_rates))
@@ -495,7 +526,7 @@ def make_multiple_value_reward_visulizations(agent, variant, i, replay_buffer, w
         images = agent.make_value_reward_visulization(variant, trajs, shaped_rewards=shaped_rewards)
     else:
         images = agent.make_value_reward_visulization(variant, trajs, shaped_rewards=None)
-    wandb_logger.log({'reward_value_images': wandb.Image(images)}, step=i)
+    #wandb_logger.log({'reward_value_images': wandb.Image(images)}, step=i)
     
 def print_green(text):
     print(f'\033[92m{text}\033[0m')

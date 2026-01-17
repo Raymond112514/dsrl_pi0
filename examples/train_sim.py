@@ -6,16 +6,17 @@ xla_flags += ' --xla_gpu_triton_gemm_any=True'
 os.environ['XLA_FLAGS'] = xla_flags
 
 import sys
-sys.path.append('/home/raymond112514/dsrl_pi0')
-sys.path.append('/home/raymond112514/LIBERO')
-sys.path.append('/home/raymond112514/dsrl_pi0/openpi')
-sys.path.append('/home/raymond112514/dsrl_pi0/openpi/src')
-sys.path.append('/home/raymond112514/dsrl_pi0/examples/classifier')
+sys.path.append('/global/home/users/r112358/dsrl_pi0')
+sys.path.append('/global/home/users/r112358/LIBERO')
+sys.path.append('/global/home/users/r112358/dsrl_pi0/openpi')
+sys.path.append('/global/home/users/r112358/dsrl_pi0/openpi/src')
+sys.path.append('/global/home/users/r112358/dsrl_pi0/examples/classifier')
 
 from buffer import LabelBuffer
 from classifier import Classifier
+from gail import GailClassifier
 import pathlib, copy
-
+import time
 import jax
 from jaxrl2.agents.pixel_sac.pixel_sac_learner import PixelSACLearner
 from jaxrl2.utils.general_utils import add_batch_dim
@@ -86,10 +87,10 @@ class DummyEnv(gym.ObservationWrapper):
 
 def build_exp_name(variant):
     if variant.use_classifier:
-        exp_name = f"task{variant.task_id}_{variant.classifier_encoder_type}_rs{variant.reward_scale}_uf{variant.classifier_update_freq}"
+        exp_name = f"task{variant.task_id}_{variant.classifier_encoder_type}_rs{variant.reward_scale}_uf{variant.classifier_update_freq}_{variant.use_classifier}_{variant.shaping_type}"
     else:
         exp_name = f"task{variant.task_id}"
-    return exp_name + f"_seed{variant.seed}"
+    return exp_name
 
 def main(variant):
     devices = jax.local_devices()
@@ -119,7 +120,7 @@ def main(variant):
     
     expname = build_exp_name(variant)
    
-    outputdir = os.path.join(os.environ['EXP'], expname)
+    outputdir = os.path.join("/global/scratch/users/r112358/pi0_exp", f"{expname}_{time.strftime('%Y%m%d-%H%M%S')}_{variant.seed}")
     variant.outputdir = outputdir
     if not os.path.exists(outputdir):
         os.makedirs(outputdir)
@@ -161,14 +162,19 @@ def main(variant):
     print('sample action shape', sample_action.shape)
     
     if variant.use_classifier:
-        classifier = Classifier(encoder_type=variant.classifier_encoder_type)
-        buffer = LabelBuffer()
+        if variant.shaping_type == "default":
+            classifier = Classifier(encoder_type=variant.classifier_encoder_type)
+            buffer = LabelBuffer()
+        elif variant.shaping_type == "gail":
+            classifier = GailClassifier(encoder_type=variant.classifier_encoder_type)
+            buffer = LabelBuffer()
     else:
         classifier = buffer = None
 
     if variant.env == 'libero':
         config = openpi_config.get_config("pi0_libero")
-        checkpoint_dir = download.maybe_download("s3://openpi-assets/checkpoints/pi0_libero")
+        #checkpoint_dir = download.maybe_download("s3://openpi-assets/checkpoints/pi0_libero")
+        checkpoint_dir = "/global/scratch/users/r112358/checkpoints/pi0_libero"
     elif variant.env == 'aloha_cube':
         config = openpi_config.get_config("pi0_aloha_sim")
         checkpoint_dir = download.maybe_download("s3://openpi-assets/checkpoints/pi0_aloha_sim")

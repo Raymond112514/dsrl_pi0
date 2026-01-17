@@ -1,6 +1,6 @@
 import sys
-sys.path.append('/home/raymond112514/dsrl_pi0')
-sys.path.append('/home/raymond112514/dsrl_pi0/LIBERO')
+sys.path.append('/global/home/users/r112358/dsrl_pi0')
+sys.path.append('/global/home/users/r112358/dsrl_pi0/LIBERO')
 
 import argparse
 import sys
@@ -29,13 +29,14 @@ if __name__ == '__main__':
     parser.add_argument('--multi_grad_step', default=1, help='Number of graident steps to take per environment step, aka UTD', type=int)
     parser.add_argument('--resize_image', default=-1, help='the size of image if need resizing', type=int)
     parser.add_argument('--query_freq', default=-1, help='query frequency', type=int)
-    parser.add_argument('--task_id', default=57, help='task id', type=int)
+    parser.add_argument('--task_id', default=44, help='task id', type=int)
     
     parser.add_argument('--use_classifier', default=False, help='whether to use classifier', type=bool)
     parser.add_argument('--classifier_encoder_type', default='cnn', help='type of encoder', type=str)
     parser.add_argument('--classifier_update_freq', default=10, help='frequency of classifier update', type=int)
     parser.add_argument('--reward_scale', default=0.0, help='reward scale', type=float)
-    
+    parser.add_argument('--shaping_type', default="default", help="", type=str)
+
     train_args_dict = dict(
         actor_lr=1e-4,
         critic_lr= 3e-4,
