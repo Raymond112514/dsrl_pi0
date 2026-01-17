@@ -2,11 +2,11 @@ import numpy as np
 import torch
 
 class LabelBuffer:
-    def __init__(self, max_size=200000):
+    def __init__(self, act_dim=32, max_size=200000):
         self.max_size = max_size
         self.state = np.zeros((max_size, 8), dtype=np.float32)
         self.pixel = np.zeros((max_size, 64, 64, 3), dtype=np.uint8)
-        self.action = np.zeros((max_size, 32), dtype=np.float32)
+        self.action = np.zeros((max_size, act_dim), dtype=np.float32)
         self.label = np.zeros((max_size,), dtype=np.int32)
         self.size = 0          
         self.ptr = 0           
