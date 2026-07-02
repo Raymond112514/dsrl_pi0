@@ -105,7 +105,7 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
         replay_buffer_iterator = map(shard_fn, replay_buffer_iterator)
     if classifier is not None:
         classifier = classifier.to('cuda')
-        val_buffer = LabelBuffer(act_dim=7)
+        val_buffer = LabelBuffer(act_dim=350)
 
     total_env_steps = 0
     i = 0
@@ -120,7 +120,7 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
     
     with tqdm(total=variant.max_steps, initial=0) as pbar:
         while i <= variant.max_steps:
-            traj = collect_traj(variant, agent, env, i, agent_dp)
+            traj = collect_traj(variant, agent, env, i, agent_dp, wandb_logger)
             num_traj += 1
             traj_id = online_replay_buffer._traj_counter
             add_online_data_to_buffer(variant, traj, online_replay_buffer)
@@ -143,9 +143,6 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
                 num_gradsteps = variant.num_online_gradsteps_batch
             else:
                 num_gradsteps = len(traj["rewards"])*variant.multi_grad_step
-
-            if num_traj == 20:
-                print(f"Number of success: {num_traj}")
 
             if num_traj >= 20:
                 print_green(f"Updating time at {i}")
@@ -293,6 +290,9 @@ def add_online_data_to_buffer(variant, traj, online_replay_buffer):
         # remove batch dimension
         obs = {k: v[0] for k, v in obs.items()}
         next_obs = {k: v[0] for k, v in next_obs.items()}
+        obs['action_diffusion'] = obs['action_diffusion'].reshape(-1, 1)
+        next_obs['action_diffusion'] = next_obs['action_diffusion'].reshape(-1, 1)
+        
         if not variant.add_states:
             obs.pop('state', None)
             next_obs.pop('state', None)
@@ -309,15 +309,19 @@ def add_online_data_to_buffer(variant, traj, online_replay_buffer):
         online_replay_buffer.insert(insert_dict)
     online_replay_buffer.increment_traj_counter()
 
-def collect_traj(variant, agent, env, i, agent_dp=None):
+def collect_traj(variant, agent, env, i, agent_dp=None, wandb_logger=None):
     """
     Residual RL version: Agent predicts residual actions that are added to base diffusion policy actions.
     """
     query_frequency = variant.query_freq
     max_timesteps = variant.max_timesteps
     env_max_reward = variant.env_max_reward
-    residual_scale = variant.get('residual_scale', 0.01)  
-    
+
+    if i == 0:
+        residual_scale = 0
+    else:
+        residual_scale = variant.get('residual_scale', 0.01)  
+    clip_scale = variant.get('clip_scale', 1)
     # Infer action dimension from environment
     if variant.env == 'libero':
         action_dim = 7
@@ -357,28 +361,32 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
         if t % query_frequency == 0:
             rng, key = jax.random.split(rng)
             obs_pi_zero = obs_to_pi_zero_input(obs, variant)
+            
             # Generating policy action
             agent_action_chunk_shape = (1, 32)
             noise = jax.random.normal(key, (1, *agent_action_chunk_shape))
             noise_repeat = jax.numpy.repeat(noise[:, -1:, :], 50 - noise.shape[1], axis=1)
             noise = jax.numpy.concatenate([noise, noise_repeat], axis=1)
             actions_noise = noise[0, :agent_action_chunk_shape[0], :]
-            diffusion_actions = agent_dp.infer(obs_pi_zero, noise=noise)["actions"]
+            diffusion_actions = agent_dp.infer(obs_pi_zero, noise=noise)["actions"] #(50, 7)
+
+            # Generating residual action
+            obs_dict['action_diffusion'] = diffusion_actions.reshape(1, 1, -1)
+            residual_actions = agent.sample_actions(obs_dict) #(1, 350)
+            obs_list.append(obs_dict)
+            action_list.append(residual_actions)
+            residual_actions = residual_actions.reshape(50, 7)
+
+            scale = np.abs(residual_actions) * residual_scale / (np.abs(diffusion_actions) + 1e-6)
+            ratio_norm = (np.linalg.norm(residual_actions, axis=-1) * residual_scale) / (np.linalg.norm(diffusion_actions, axis=-1) + 1e-6)
+            if wandb_logger:
+                wandb_logger.log({'scale/mean': np.mean(scale), 'scale/norm': ratio_norm}, step=i)
+            actions = diffusion_actions + residual_scale * residual_actions
 
         # Generating residual actions
-        action_t = diffusion_actions[t % query_frequency]
-        obs_dict['action_diffusion'] = action_t[None,][:, :, None]
-
-        # Execute combined action
-        if i == 0:
-            actions_residual = np.zeros_like(action_t)
-        else:
-            actions_residual = agent.sample_actions(obs_dict)[0]
-        action_list.append(actions_residual)
-        obs_list.append(obs_dict)
-        residual_action_t = action_t + residual_scale * actions_residual
+        action_t = actions[t % query_frequency]
         if 'libero' in variant.env:
-            obs, reward, done, _ = env.step(residual_action_t)
+            obs, reward, done, _ = env.step(action_t)
         elif 'aloha' in variant.env:
             obs, reward, terminated, truncated, _ = env.step(action_t)
             done = terminated or truncated
@@ -391,7 +399,25 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
     # add last observation
     curr_image = obs_to_img(obs, variant)
     qpos = obs_to_qpos(obs, variant)
+    if variant.add_states:
+        obs_dict = {
+                'pixels': curr_image[np.newaxis, ..., np.newaxis],
+                'state': qpos[np.newaxis, ..., np.newaxis],
+                }
+    else:
+        obs_dict = {
+                'pixels': curr_image[np.newaxis, ..., np.newaxis],
+                }
+    rng, key = jax.random.split(rng)
+    obs_pi_zero = obs_to_pi_zero_input(obs, variant)
     
+    # Generate policy action
+    noise = jax.random.normal(key, (1, *agent_action_chunk_shape))
+    noise_repeat = jax.numpy.repeat(noise[:, -1:, :], 50 - noise.shape[1], axis=1)
+    noise = jax.numpy.concatenate([noise, noise_repeat], axis=1)
+    actions_noise = noise[0, :agent_action_chunk_shape[0], :]
+    diffusion_actions = agent_dp.infer(obs_pi_zero, noise=noise)["actions"]
+    obs_dict['action_diffusion'] = diffusion_actions.reshape(1, 1, -1)
     obs_list.append(obs_dict)
     image_list.append(curr_image)
     
@@ -435,7 +461,7 @@ def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None):
     env_max_reward = variant.env_max_reward
     residual_scale = variant.get('residual_scale', 0.01)
     action_horizon = variant.get('action_horizon', agent.action_chunk_shape[0] if hasattr(agent, 'action_chunk_shape') else 4)
-    
+    clip_scale = variant.get('clip_scale', 1)
     if variant.env == 'libero':
         action_dim = 7
     elif variant.env == 'aloha_cube':
@@ -485,16 +511,15 @@ def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None):
                 actions_noise = noise[0, :agent_action_chunk_shape[0], :]
                 diffusion_actions = agent_dp.infer(obs_pi_zero, noise=noise)["actions"]
                 
-                
-                
-            # Build observation with diffusion action
-            action_t = diffusion_actions[t % query_frequency]
-            obs_dict['action_diffusion'] = action_t[None,][:, :, None]
-            actions_residual = agent.sample_actions(obs_dict)[0]
+                # Generate residual actions
+                obs_dict['action_diffusion'] = diffusion_actions.reshape(1, 1, -1)
+                residual_actions = agent.sample_actions(obs_dict) #(1, 350)
+                residual_actions = residual_actions.reshape(50, 7)
+                actions = diffusion_actions + residual_scale * residual_actions
             
-            residual_action_t = action_t + residual_scale * actions_residual
+            action_t = actions[t % query_frequency]
             if 'libero' in variant.env:
-                obs, reward, done, _ = env.step(residual_action_t)
+                obs, reward, done, _ = env.step(action_t)
             elif 'aloha' in variant.env:
                 obs, reward, terminated, truncated, _ = env.step(action_t)
                 done = terminated or truncated

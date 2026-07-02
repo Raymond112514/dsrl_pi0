@@ -29,7 +29,7 @@ from gym.spaces import Dict, Box
 from libero.libero import benchmark
 from libero.libero import get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
-
+import random
 from jaxrl2.data import ReplayBuffer
 from jaxrl2.utils.wandb_logger import WandBLogger, create_exp_name
 import tempfile
@@ -92,16 +92,15 @@ class DummyEnv(gym.ObservationWrapper):
             action_dim = 14  # Check actual dim for aloha
         else:
             action_dim = 7  # Default
-        diffusion_action_dim = 7
-        print(f"Diffusion action dimension: {diffusion_action_dim}")
+        diffusion_action_dim = 7 * 50
         obs_dict['action_diffusion'] = Box(low=-np.inf, high=np.inf, shape=(diffusion_action_dim, 1), dtype=np.float32)
         
         self.observation_space = Dict(obs_dict)
-        self.action_space = Box(low=-1, high=1, shape=(1, 7,), dtype=np.float32) # 32 is the noise action space of pi 0
+        self.action_space = Box(low=-1, high=1, shape=(1, 350), dtype=np.float32) # 32 is the noise action space of pi 0
 
 def build_exp_name(variant):
     if variant.use_classifier:
-        exp_name = f"task{variant.task_id}_{variant.classifier_encoder_type}_rs{variant.reward_scale}_uf{variant.classifier_update_freq}_{variant.use_classifier}"
+        exp_name = f"task{variant.task_id}_res{variant.residual_scale}_rs{variant.reward_scale}_uf{variant.classifier_update_freq}_{variant.use_classifier}"
     else:
         exp_name = f"task{variant.task_id}"
     return exp_name
@@ -128,8 +127,8 @@ def main(variant):
         variant.prefix = str(uuid.uuid4().fields[-1])[:5]
 
     expname = build_exp_name(variant)
-   
-    outputdir = os.path.join("/global/scratch/users/r112358/pi0_exp", f"{expname}_{time.strftime('%Y%m%d-%H%M%S')}_{variant.seed}")
+    rand = random.randint(0, 99999)
+    outputdir = os.path.join("/global/scratch/users/r112358/pi0_exp", f"{expname}_{time.strftime('%Y%m%d-%H%M%S')}_{variant.seed}_{rand}")
     variant.outputdir = outputdir
     if not os.path.exists(outputdir):
         os.makedirs(outputdir)
@@ -162,7 +161,7 @@ def main(variant):
 
     group_name = variant.prefix + '_' + variant.launch_group_id
     wandb_output_dir = tempfile.mkdtemp()
-    wandb_logger = WandBLogger(variant.prefix != '', variant, "dsrl_pi0_shaped", experiment_id=expname, output_dir=wandb_output_dir, group_name=group_name)
+    wandb_logger = WandBLogger(variant.prefix != '', variant, "dsrl_pi0_residual", experiment_id=expname, output_dir=wandb_output_dir, group_name=group_name)
 
     dummy_env = DummyEnv(variant)
     sample_obs = add_batch_dim(dummy_env.observation_space.sample())
@@ -172,11 +171,11 @@ def main(variant):
     
     if variant.use_classifier:
         if True:
-            classifier = Classifier(action_dim=7, encoder_type=variant.classifier_encoder_type)
-            buffer = LabelBuffer(act_dim=7)
+            classifier = Classifier(action_dim=350, encoder_type=variant.classifier_encoder_type)
+            buffer = LabelBuffer(act_dim=350)
         elif variant.shaping_type == "gail":
             classifier = GailClassifier(encoder_type=variant.classifier_encoder_type)
-            buffer = LabelBuffer(act_dim=7)
+            buffer = LabelBuffer(act_dim=350)
     else:
         classifier = buffer = None
 

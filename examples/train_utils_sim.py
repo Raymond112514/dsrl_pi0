@@ -150,9 +150,6 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
             else:
                 num_gradsteps = len(traj["rewards"])*variant.multi_grad_step
 
-            if num_traj == 20:
-                print(f"Number of success: {num_traj}")
-
             if num_traj >= 20:
                 print_green(f"Updating time at {i}")
                 update_classifier_time = i if update_classifier_time == 0 else update_classifier_time

@@ -33,7 +33,7 @@ if __name__ == '__main__':
     
     # Residual RL specific parameters
     parser.add_argument('--residual_scale', default=0.01, help='Scale factor for residual actions', type=float)
-    
+    parser.add_argument('--clip_scale', default=1, help='', type=float) 
     parser.add_argument('--use_classifier', default=False, help='whether to use classifier', type=bool)
     parser.add_argument('--classifier_encoder_type', default='cnn', help='type of encoder', type=str)
     parser.add_argument('--classifier_update_freq', default=10, help='frequency of classifier update', type=int)
