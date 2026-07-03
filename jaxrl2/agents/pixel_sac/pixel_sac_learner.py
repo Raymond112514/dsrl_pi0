@@ -14,7 +14,7 @@ from typing import Dict, Optional, Sequence, Tuple, Union
 import jax
 import jax.numpy as jnp
 import optax
-from flax.core.frozen_dict import FrozenDict
+from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
 from flax.training import train_state
 from typing import Any
 
@@ -124,6 +124,7 @@ class PixelSACLearner(Agent):
                  target_entropy: float = None,
                  action_magnitude: float = 1.0,
                  num_cameras: int = 1,
+                 zero_init_actor_mean: bool = False,
                  ):
         """
         An implementation of the version of Soft-Actor-Critic described in https://arxiv.org/abs/1812.05905
@@ -182,6 +183,16 @@ class PixelSACLearner(Agent):
         print(actor_def)
         actor_def_init = actor_def.init(actor_key, observations)
         actor_params = actor_def_init['params']
+        if zero_init_actor_mean:
+            actor_unfrozen = unfreeze(actor_params)
+            actor_unfrozen['network']['Dense_0']['kernel'] = jnp.zeros_like(
+                actor_unfrozen['network']['Dense_0']['kernel']
+            )
+            if actor_unfrozen['network']['Dense_0'].get('bias') is not None:
+                actor_unfrozen['network']['Dense_0']['bias'] = jnp.zeros_like(
+                    actor_unfrozen['network']['Dense_0']['bias']
+                )
+            actor_params = freeze(actor_unfrozen)
         actor_batch_stats = actor_def_init['batch_stats'] if 'batch_stats' in actor_def_init else None
 
         actor = TrainState.create(apply_fn=actor_def.apply,
@@ -227,7 +238,6 @@ class PixelSACLearner(Agent):
             self.target_entropy = float(target_entropy)
         print(f'target_entropy: {self.target_entropy}')
         print(self.critic_reduction)
-        
 
     def update(self, batch: FrozenDict) -> Dict[str, float]:
         new_rng, new_actor, new_critic, new_target_critic, new_temp, info = _update_jit(

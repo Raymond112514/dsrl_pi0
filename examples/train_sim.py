@@ -78,8 +78,15 @@ class DummyEnv(gym.ObservationWrapper):
             elif variant.env == 'aloha_cube':
                 state_dim = 14
             obs_dict['state'] = Box(low=-1.0, high=1.0, shape=(state_dim, 1), dtype=np.float32)
+        if variant.env == 'libero':
+            residual_dim = variant.pi0_action_horizon * variant.env_action_dim
+            obs_dict['action_diffusion'] = Box(
+                low=-np.inf, high=np.inf, shape=(residual_dim, 1), dtype=np.float32
+            )
+            self.action_space = Box(low=-1, high=1, shape=(1, residual_dim), dtype=np.float32)
+        else:
+            self.action_space = Box(low=-1, high=1, shape=(1, 32,), dtype=np.float32)
         self.observation_space = Dict(obs_dict)
-        self.action_space = Box(low=-1, high=1, shape=(1, 32,), dtype=np.float32) # 32 is the noise action space of pi 0
 
 def build_exp_name(variant):
     return f"task{variant.task_id}"
@@ -143,16 +150,6 @@ def main(variant):
         variant.max_timesteps = 400
         
 
-    group_name = variant.prefix + '_' + variant.launch_group_id
-    wandb_output_dir = tempfile.mkdtemp()
-    wandb_logger = WandBLogger(variant.prefix != '', variant, variant.wandb_project, experiment_id=expname, output_dir=wandb_output_dir, group_name=group_name)
-
-    dummy_env = DummyEnv(variant)
-    sample_obs = add_batch_dim(dummy_env.observation_space.sample())
-    sample_action = add_batch_dim(dummy_env.action_space.sample())
-    print('sample obs shapes', [(k, v.shape) for k, v in sample_obs.items()])
-    print('sample action shape', sample_action.shape)
-
     if variant.env == 'libero':
         config = openpi_config.get_config("pi05_libero")
         checkpoint_dir = variant.pi0_checkpoint or download.maybe_download("gs://openpi-assets/checkpoints/pi05_libero")
@@ -165,9 +162,30 @@ def main(variant):
     variant.pi0_action_dim = config.model.action_dim
     if variant.query_freq <= 0:
         variant.query_freq = variant.pi0_action_horizon
+    if variant.env == 'libero':
+        variant.env_action_dim = 7
+        if not hasattr(variant, 'residual_scale') or variant.residual_scale is None:
+            variant.residual_scale = 0.01
     agent_dp = policy_config.create_trained_policy(config, checkpoint_dir)
     print("Loaded pi policy from %s", checkpoint_dir)
-    agent = PixelSACLearner(variant.seed, sample_obs, sample_action, **kwargs)
+
+    group_name = variant.prefix + '_' + variant.launch_group_id
+    wandb_output_dir = tempfile.mkdtemp()
+    wandb_logger = WandBLogger(variant.prefix != '', variant, variant.wandb_project, experiment_id=expname, output_dir=wandb_output_dir, group_name=group_name)
+
+    dummy_env = DummyEnv(variant)
+    sample_obs = add_batch_dim(dummy_env.observation_space.sample())
+    sample_action = add_batch_dim(dummy_env.action_space.sample())
+    print('sample obs shapes', [(k, v.shape) for k, v in sample_obs.items()])
+    print('sample action shape', sample_action.shape)
+
+    agent = PixelSACLearner(
+        variant.seed,
+        sample_obs,
+        sample_action,
+        zero_init_actor_mean=(variant.env == 'libero'),
+        **kwargs,
+    )
 
     online_buffer_size = variant.max_steps  // variant.multi_grad_step
     online_replay_buffer = ReplayBuffer(dummy_env.observation_space, dummy_env.action_space, int(online_buffer_size))

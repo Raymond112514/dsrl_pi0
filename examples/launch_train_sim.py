@@ -32,6 +32,12 @@ if __name__ == '__main__':
     parser.add_argument('--task_id', default=44, help='task id', type=int)
     parser.add_argument('--output_dir', default='', help='Base directory for experiment outputs')
     parser.add_argument('--pi0_checkpoint', default='', help='Local pi0 checkpoint directory; download default if unset or missing')
+    parser.add_argument('--residual_scale', type=float, default=0.01, help='Scale factor for residual actions')
+    parser.add_argument(
+        '--collect_with_residual',
+        action='store_true',
+        help='Apply SAC residual during rollout collection from the first trajectory',
+    )
 
     train_args_dict = dict(
         actor_lr=1e-4,

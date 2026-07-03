@@ -30,6 +30,7 @@ python3 examples/launch_train_sim.py \
 --start_online_updates 500 \
 --resize_image 64 \
 --action_magnitude 1.0 \
+--residual_scale 0.01 \
 --query_freq 10 \
 --hidden_dims 128 \
 --output_dir ${EXP} \

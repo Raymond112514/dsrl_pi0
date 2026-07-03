@@ -91,6 +91,25 @@ def obs_to_qpos(obs, variant):
         raise NotImplementedError()
     return qpos
 
+def compute_action_chunk(variant, agent, agent_dp, rng, obs_pi_zero, obs_dict, *, use_residual):
+    rng, key = jax.random.split(rng)
+    noise = jax.random.normal(key, (1, variant.pi0_action_horizon, variant.pi0_action_dim))
+    a_base = agent_dp.infer(obs_pi_zero, noise=noise)["actions"]
+    obs_dict = {**obs_dict, "action_diffusion": a_base.reshape(1, -1, 1)}
+    if use_residual:
+        a_res = agent.sample_actions(obs_dict).reshape(a_base.shape)
+        actions = a_base + variant.residual_scale * a_res
+        residual_flat = a_res.reshape(1, -1)
+    else:
+        actions = a_base
+        residual_flat = np.zeros((1, np.prod(a_base.shape)), dtype=np.float32)
+    return rng, actions, residual_flat, obs_dict
+
+def should_use_residual(variant, i):
+    if getattr(variant, 'collect_with_residual', False):
+        return True
+    return i > 0
+
 def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_replay_buffer, replay_buffer, wandb_logger,
                                        perform_control_evals=True, shard_fn=None, agent_dp=None):
     replay_buffer_iterator = replay_buffer.get_iterator(variant.batch_size)
@@ -229,24 +248,13 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
         if t % query_frequency == 0:
 
             assert agent_dp is not None
-            # we then use the noise to sample the action from diffusion model
             rng, key = jax.random.split(rng)
             obs_pi_zero = obs_to_pi_zero_input(obs, variant)
-            if i == 0:
-                # for initial round of data collection, we sample from standard gaussian noise
-                noise = jax.random.normal(key, (1, *agent.action_chunk_shape))
-                noise_repeat = jax.numpy.repeat(noise[:, -1:, :], variant.pi0_action_horizon - noise.shape[1], axis=1)
-                noise = jax.numpy.concatenate([noise, noise_repeat], axis=1)
-                actions_noise = noise[0, :agent.action_chunk_shape[0], :]
-            else:
-                # sac agent predicts the noise for diffusion model
-                actions_noise = agent.sample_actions(obs_dict)
-                actions_noise = np.reshape(actions_noise, agent.action_chunk_shape)
-                noise = np.repeat(actions_noise[-1:, :], variant.pi0_action_horizon - actions_noise.shape[0], axis=0)
-                noise = jax.numpy.concatenate([actions_noise, noise], axis=0)[None]
-            
-            actions = agent_dp.infer(obs_pi_zero, noise=noise)["actions"]
-            action_list.append(actions_noise)
+            use_residual = should_use_residual(variant, i)
+            rng, actions, residual_flat, obs_dict = compute_action_chunk(
+                variant, agent, agent_dp, rng, obs_pi_zero, obs_dict, use_residual=use_residual
+            )
+            action_list.append(residual_flat)
             obs_list.append(obs_dict)
      
         action_t = actions[t % query_frequency]
@@ -268,6 +276,11 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
         'pixels': curr_image[np.newaxis, ..., np.newaxis],
         'state': qpos[np.newaxis, ..., np.newaxis],
     }
+    if variant.env == 'libero' and agent_dp is not None:
+        obs_pi_zero = obs_to_pi_zero_input(obs, variant)
+        _, _, _, obs_dict = compute_action_chunk(
+            variant, agent, agent_dp, rng, obs_pi_zero, obs_dict, use_residual=False
+        )
     obs_list.append(obs_dict)
     image_list.append(curr_image)
     
@@ -338,22 +351,13 @@ def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None):
                         'pixels': curr_image[np.newaxis, ..., np.newaxis],
                     }
 
-                rng, key = jax.random.split(rng)
                 assert agent_dp is not None
                 
                 obs_pi_zero = obs_to_pi_zero_input(obs, variant)
-                
-                
-                if i == 0:
-                    # for initial evaluation, we sample from standard gaussian noise to evaluate the base policy's performance
-                    noise = jax.random.normal(rng, (1, variant.pi0_action_horizon, variant.pi0_action_dim))
-                else:
-                    actions_noise = agent.sample_actions(obs_dict)
-                    actions_noise = np.reshape(actions_noise, agent.action_chunk_shape)
-                    noise = np.repeat(actions_noise[-1:, :], variant.pi0_action_horizon - actions_noise.shape[0], axis=0)
-                    noise = jax.numpy.concatenate([actions_noise, noise], axis=0)[None]
-                    
-                actions = agent_dp.infer(obs_pi_zero, noise=noise)["actions"]
+                use_residual = i > 0
+                rng, actions, _, obs_dict = compute_action_chunk(
+                    variant, agent, agent_dp, rng, obs_pi_zero, obs_dict, use_residual=use_residual
+                )
               
             action_t = actions[t % query_frequency]
             
@@ -400,5 +404,5 @@ def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None):
 
 def make_multiple_value_reward_visulizations(agent, variant, i, replay_buffer, wandb_logger):
     trajs = replay_buffer.get_random_trajs(3)
-    agent.make_value_reward_visulization(variant, trajs, shaped_rewards=None)
-    #wandb_logger.log({'reward_value_images': wandb.Image(images)}, step=i)
+    images = agent.make_value_reward_visulization(variant, trajs, shaped_rewards=None)
+    wandb_logger.log({'reward_value_images': wandb.Image(images)}, step=i)
