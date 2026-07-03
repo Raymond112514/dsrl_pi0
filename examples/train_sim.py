@@ -5,16 +5,12 @@ xla_flags = os.environ.get('XLA_FLAGS', '')
 xla_flags += ' --xla_gpu_triton_gemm_any=True'
 os.environ['XLA_FLAGS'] = xla_flags
 
-import sys
-sys.path.append('/global/home/users/r112358/dsrl_pi0')
-sys.path.append('/global/home/users/r112358/LIBERO')
-sys.path.append('/global/home/users/r112358/dsrl_pi0/openpi')
-sys.path.append('/global/home/users/r112358/dsrl_pi0/openpi/src')
-sys.path.append('/global/home/users/r112358/dsrl_pi0/examples/classifier')
+# import sys
+# sys.path.append('/global/home/users/r112358/dsrl_pi0')
+# sys.path.append('/global/home/users/r112358/LIBERO')
+# sys.path.append('/global/home/users/r112358/dsrl_pi0/openpi')
+# sys.path.append('/global/home/users/r112358/dsrl_pi0/openpi/src')
 
-from buffer import LabelBuffer
-from classifier import Classifier
-from gail import GailClassifier
 import pathlib, copy
 import time
 import jax
@@ -86,11 +82,7 @@ class DummyEnv(gym.ObservationWrapper):
         self.action_space = Box(low=-1, high=1, shape=(1, 32,), dtype=np.float32) # 32 is the noise action space of pi 0
 
 def build_exp_name(variant):
-    if variant.use_classifier:
-        exp_name = f"task{variant.task_id}_{variant.classifier_encoder_type}_rs{variant.reward_scale}_uf{variant.classifier_update_freq}_{variant.use_classifier}_{variant.shaping_type}"
-    else:
-        exp_name = f"task{variant.task_id}"
-    return exp_name
+    return f"task{variant.task_id}"
 
 def main(variant):
     devices = jax.local_devices()
@@ -119,11 +111,11 @@ def main(variant):
     #     expname = create_exp_name(variant.prefix, seed=variant.seed)
     
     expname = build_exp_name(variant)
-   
-    outputdir = os.path.join("/global/scratch/users/r112358/pi0_exp", f"{expname}_{time.strftime('%Y%m%d-%H%M%S')}_{variant.seed}")
+
+    output_root = variant.output_dir
+    outputdir = os.path.join(output_root, f"{expname}_{time.strftime('%Y%m%d-%H%M%S')}_{variant.seed}")
     variant.outputdir = outputdir
-    if not os.path.exists(outputdir):
-        os.makedirs(outputdir)
+    os.makedirs(outputdir, exist_ok=True)
     print('writing to output dir ', outputdir)
     
     if variant.env == 'libero':
@@ -153,28 +145,17 @@ def main(variant):
 
     group_name = variant.prefix + '_' + variant.launch_group_id
     wandb_output_dir = tempfile.mkdtemp()
-    wandb_logger = WandBLogger(variant.prefix != '', variant, "dsrl_pi0_shaped", experiment_id=expname, output_dir=wandb_output_dir, group_name=group_name)
+    wandb_logger = WandBLogger(variant.prefix != '', variant, variant.wandb_project, experiment_id=expname, output_dir=wandb_output_dir, group_name=group_name)
 
     dummy_env = DummyEnv(variant)
     sample_obs = add_batch_dim(dummy_env.observation_space.sample())
     sample_action = add_batch_dim(dummy_env.action_space.sample())
     print('sample obs shapes', [(k, v.shape) for k, v in sample_obs.items()])
     print('sample action shape', sample_action.shape)
-    
-    if variant.use_classifier:
-        if variant.shaping_type == "default":
-            classifier = Classifier(encoder_type=variant.classifier_encoder_type)
-            buffer = LabelBuffer()
-        elif variant.shaping_type == "gail":
-            classifier = GailClassifier(encoder_type=variant.classifier_encoder_type)
-            buffer = LabelBuffer()
-    else:
-        classifier = buffer = None
 
     if variant.env == 'libero':
         config = openpi_config.get_config("pi0_libero")
-        #checkpoint_dir = download.maybe_download("s3://openpi-assets/checkpoints/pi0_libero")
-        checkpoint_dir = "/global/scratch/users/r112358/checkpoints/pi0_libero"
+        checkpoint_dir = variant.pi0_checkpoint or download.maybe_download("s3://openpi-assets/checkpoints/pi0_libero")
     elif variant.env == 'aloha_cube':
         config = openpi_config.get_config("pi0_aloha_sim")
         checkpoint_dir = download.maybe_download("s3://openpi-assets/checkpoints/pi0_aloha_sim")
@@ -182,11 +163,11 @@ def main(variant):
         raise NotImplementedError()
     agent_dp = policy_config.create_trained_policy(config, checkpoint_dir)
     print("Loaded pi0 policy from %s", checkpoint_dir)
-    agent = PixelSACLearner(variant.seed, sample_obs, sample_action, **kwargs, classifier=classifier)
+    agent = PixelSACLearner(variant.seed, sample_obs, sample_action, **kwargs)
 
     online_buffer_size = variant.max_steps  // variant.multi_grad_step
     online_replay_buffer = ReplayBuffer(dummy_env.observation_space, dummy_env.action_space, int(online_buffer_size))
     replay_buffer = online_replay_buffer
     replay_buffer.seed(variant.seed)
-    trajwise_alternating_training_loop(variant, agent, env, eval_env, online_replay_buffer, replay_buffer, wandb_logger, shard_fn=shard_fn, agent_dp=agent_dp, classifier=classifier, buffer=buffer)
+    trajwise_alternating_training_loop(variant, agent, env, eval_env, online_replay_buffer, replay_buffer, wandb_logger, shard_fn=shard_fn, agent_dp=agent_dp)
  

@@ -34,10 +34,6 @@ from jaxrl2.networks.values import StateActionEnsemble
 from jaxrl2.types import Params, PRNGKey
 from jaxrl2.utils.target_update import soft_target_update
 
-import sys
-sys.path.append('/home/raymond112514/dsrl_pi0/examples/classifier')
-from classifier import Classifier
-
 
 class TrainState(train_state.TrainState):
     batch_stats: Any
@@ -128,7 +124,6 @@ class PixelSACLearner(Agent):
                  target_entropy: float = None,
                  action_magnitude: float = 1.0,
                  num_cameras: int = 1,
-                 classifier: Optional[Classifier] = None
                  ):
         """
         An implementation of the version of Soft-Actor-Critic described in https://arxiv.org/abs/1812.05905
@@ -246,9 +241,9 @@ class PixelSACLearner(Agent):
         self._temp = new_temp
         return info
 
-    def perform_eval(self, variant, i, wandb_logger, eval_buffer, eval_buffer_iterator, eval_env, classifier):
+    def perform_eval(self, variant, i, wandb_logger, eval_buffer, eval_buffer_iterator, eval_env):
         from examples.train_utils_sim import make_multiple_value_reward_visulizations
-        make_multiple_value_reward_visulizations(self, variant, i, eval_buffer, wandb_logger, classifier)
+        make_multiple_value_reward_visulizations(self, variant, i, eval_buffer, wandb_logger)
 
     def make_value_reward_visulization(self, variant, trajs, shaped_rewards=None):
         num_traj = len(trajs['rewards'])

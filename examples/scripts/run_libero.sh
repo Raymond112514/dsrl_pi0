@@ -1,6 +1,6 @@
 #!/bin/bash
 proj_name=DSRL_pi0_Libero
-device_id=0
+device_id=3
 
 export DISPLAY=:0
 export MUJOCO_GL=egl
@@ -32,7 +32,5 @@ python3 examples/launch_train_sim.py \
 --action_magnitude 1.0 \
 --query_freq 20 \
 --hidden_dims 128 \
---use_classifier false \
---classifier_encoder_type resnet \
---classifier_update_freq 100 \
---reward_scale 0.0 \
+--output_dir ${EXP} \
+--task_id 57 
