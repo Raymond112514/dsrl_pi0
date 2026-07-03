@@ -30,7 +30,7 @@ from jaxrl2.data import ReplayBuffer
 from jaxrl2.utils.wandb_logger import WandBLogger, create_exp_name
 import tempfile
 from functools import partial
-from examples.train_utils_sim import trajwise_alternating_training_loop
+from examples.train_utils_sim import trajwise_alternating_training_loop, log_basis_explained_variance
 import tensorflow as tf
 from jax.experimental.compilation_cache import compilation_cache
 
@@ -83,13 +83,31 @@ class DummyEnv(gym.ObservationWrapper):
             obs_dict['action_diffusion'] = Box(
                 low=-np.inf, high=np.inf, shape=(residual_dim, 1), dtype=np.float32
             )
-            self.action_space = Box(low=-1, high=1, shape=(1, residual_dim), dtype=np.float32)
+            if getattr(variant, 'use_eigenbasis', False):
+                sac_dim = variant.num_basis
+            else:
+                sac_dim = residual_dim
+            self.action_space = Box(low=-1, high=1, shape=(1, sac_dim), dtype=np.float32)
         else:
             self.action_space = Box(low=-1, high=1, shape=(1, 32,), dtype=np.float32)
         self.observation_space = Dict(obs_dict)
 
 def build_exp_name(variant):
-    return f"task{variant.task_id}"
+    parts = [f"task{variant.task_id}"]
+    if getattr(variant, 'use_eigenbasis', False):
+        parts.append(f"K{variant.num_basis}")
+    return "_".join(parts)
+
+
+def load_basis_if_provided(variant):
+    if not getattr(variant, 'use_eigenbasis', False):
+        return None
+    basis_path = variant.get('basis_path', '')
+    if basis_path and os.path.isfile(basis_path):
+        from examples.residual_basis import ResidualActionBasis
+        print(f"Loading PCA basis from {basis_path}")
+        return ResidualActionBasis.load(basis_path)
+    return None
 
 def main(variant):
     devices = jax.local_devices()
@@ -191,5 +209,8 @@ def main(variant):
     online_replay_buffer = ReplayBuffer(dummy_env.observation_space, dummy_env.action_space, int(online_buffer_size))
     replay_buffer = online_replay_buffer
     replay_buffer.seed(variant.seed)
+    variant.basis = load_basis_if_provided(variant)
+    if variant.basis is not None:
+        log_basis_explained_variance(wandb_logger, variant.basis, step=0)
     trajwise_alternating_training_loop(variant, agent, env, eval_env, online_replay_buffer, replay_buffer, wandb_logger, shard_fn=shard_fn, agent_dp=agent_dp)
  

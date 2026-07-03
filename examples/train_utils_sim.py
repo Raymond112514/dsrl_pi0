@@ -1,4 +1,5 @@
 from tqdm import tqdm
+import os
 import numpy as np
 import wandb
 import jax
@@ -91,11 +92,26 @@ def obs_to_qpos(obs, variant):
         raise NotImplementedError()
     return qpos
 
-def compute_action_chunk(variant, agent, agent_dp, rng, obs_pi_zero, obs_dict, *, use_residual):
+def compute_action_chunk(variant, agent, agent_dp, rng, obs_pi_zero, obs_dict, *, use_residual, basis=None):
     rng, key = jax.random.split(rng)
     noise = jax.random.normal(key, (1, variant.pi0_action_horizon, variant.pi0_action_dim))
     a_base = agent_dp.infer(obs_pi_zero, noise=noise)["actions"]
     obs_dict = {**obs_dict, "action_diffusion": a_base.reshape(1, -1, 1)}
+
+    if getattr(variant, 'use_eigenbasis', False):
+        num_basis = variant.num_basis
+        if use_residual and basis is not None:
+            coeffs = agent.sample_actions(obs_dict)
+            if coeffs.ndim == 1:
+                coeffs = coeffs.reshape(1, -1)
+            res_chunk = basis.coeffs_to_chunk(coeffs[0], variant.residual_scale)
+            actions = a_base + res_chunk
+            stored_action = coeffs.astype(np.float32)
+        else:
+            actions = a_base
+            stored_action = np.zeros((1, num_basis), dtype=np.float32)
+        return rng, actions, stored_action, obs_dict
+
     if use_residual:
         a_res = agent.sample_actions(obs_dict).reshape(a_base.shape)
         actions = a_base + variant.residual_scale * a_res
@@ -104,6 +120,40 @@ def compute_action_chunk(variant, agent, agent_dp, rng, obs_pi_zero, obs_dict, *
         actions = a_base
         residual_flat = np.zeros((1, np.prod(a_base.shape)), dtype=np.float32)
     return rng, actions, residual_flat, obs_dict
+
+
+def log_basis_explained_variance(wandb_logger, basis, step=0):
+    if basis.explained_variance_ratio is None:
+        return
+    explained = np.asarray(basis.explained_variance_ratio, dtype=np.float64)
+    metrics = {
+        'basis/num_components': basis.num_basis,
+        'basis/total_explained_variance': float(explained.sum()),
+    }
+    for idx, ratio in enumerate(explained):
+        metrics[f'basis/pc_{idx}_explained_variance'] = float(ratio)
+    wandb_logger.log(metrics, step=step)
+    per_pc = ', '.join(f'PC{i}={explained[i]:.4f}' for i in range(len(explained)))
+    print_green(f'Basis explained variance: total={explained.sum():.4f} ({per_pc})')
+
+
+def fit_basis_from_warmup_chunks(variant, warmup_chunks):
+    from examples.residual_basis import ResidualActionBasis
+
+    action_dim = 7 if variant.env == 'libero' else 14
+    basis = ResidualActionBasis.fit_top_k(
+        np.stack(warmup_chunks, axis=0),
+        variant.num_basis,
+        query_freq=variant.query_freq,
+        action_dim=action_dim,
+    )
+    save_path = os.path.join(variant.outputdir, "residual_basis.npz")
+    basis.save(save_path)
+    print_green(
+        f"Fitted {basis.num_basis} PCs on {len(warmup_chunks)} chunks from "
+        f"{variant.warmup_rollouts} warmup trajectories"
+    )
+    return basis
 
 def should_use_residual(variant, i):
     if getattr(variant, 'collect_with_residual', False):
@@ -119,33 +169,47 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
     total_env_steps = 0
     i = 0
     num_traj = 0
+    warmup_rollouts = getattr(variant, 'warmup_rollouts', 20)
+    basis = getattr(variant, 'basis', None)
+    warmup_chunks = []
     wandb_logger.log({'num_online_samples': 0}, step=i)
     wandb_logger.log({'num_online_trajs': 0}, step=i)
     wandb_logger.log({'env_steps': 0}, step=i)
     
     with tqdm(total=variant.max_steps, initial=0) as pbar:
         while i <= variant.max_steps:
-            traj = collect_traj(variant, agent, env, i, agent_dp)
+            traj = collect_traj(variant, agent, env, i, agent_dp, basis=basis)
             num_traj += 1
             traj_id = online_replay_buffer._traj_counter
             add_online_data_to_buffer(variant, traj, online_replay_buffer)
+            if basis is None and getattr(variant, 'use_eigenbasis', False):
+                warmup_chunks.extend(traj.get('pi0_chunks', []))
             total_env_steps += traj['env_steps']
             print('online buffer timesteps length:', len(online_replay_buffer))
             print('online buffer num traj:', traj_id + 1)
             print('total env steps:', total_env_steps)
+
+            if (
+                basis is None
+                and getattr(variant, 'use_eigenbasis', False)
+                and num_traj >= warmup_rollouts
+            ):
+                basis = fit_basis_from_warmup_chunks(variant, warmup_chunks)
+                variant.basis = basis
+                log_basis_explained_variance(wandb_logger, basis, step=i)
             
             if variant.get("num_online_gradsteps_batch", -1) > 0:
                 num_gradsteps = variant.num_online_gradsteps_batch
             else:
                 num_gradsteps = len(traj["rewards"])*variant.multi_grad_step
 
-            if num_traj >= 20:
+            if num_traj >= warmup_rollouts:
                 print_green(f"Updating time at {i}")
                 for _ in range(num_gradsteps):
                     if i == 0:
                         print('performing evaluation for initial checkpoint')
                         if perform_control_evals:
-                            perform_control_eval(agent, eval_env, i, variant, wandb_logger, agent_dp)
+                            perform_control_eval(agent, eval_env, i, variant, wandb_logger, agent_dp, basis=basis)
                         if hasattr(agent, 'perform_eval'):
                             agent.perform_eval(variant, i, wandb_logger, replay_buffer, replay_buffer_iterator, eval_env)
 
@@ -176,7 +240,7 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
                         wandb_logger.log({'num_online_trajs': traj_id + 1}, step=i)
                         wandb_logger.log({'env_steps': total_env_steps}, step=i)
                         if perform_control_evals:
-                            perform_control_eval(agent, eval_env, i, variant, wandb_logger, agent_dp)
+                            perform_control_eval(agent, eval_env, i, variant, wandb_logger, agent_dp, basis=basis)
                         if hasattr(agent, 'perform_eval'):
                             agent.perform_eval(variant, i, wandb_logger, replay_buffer, replay_buffer_iterator, eval_env)
 
@@ -213,7 +277,7 @@ def add_online_data_to_buffer(variant, traj, online_replay_buffer):
         online_replay_buffer.insert(insert_dict)
     online_replay_buffer.increment_traj_counter()
 
-def collect_traj(variant, agent, env, i, agent_dp=None):
+def collect_traj(variant, agent, env, i, agent_dp=None, basis=None):
     query_frequency = variant.query_freq
     max_timesteps = variant.max_timesteps
     env_max_reward = variant.env_max_reward
@@ -229,6 +293,7 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
     rewards = []
     action_list = []
     obs_list = []
+    pi0_chunks = []
 
     for t in tqdm(range(max_timesteps)):
         curr_image = obs_to_img(obs, variant)
@@ -250,12 +315,17 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
             assert agent_dp is not None
             rng, key = jax.random.split(rng)
             obs_pi_zero = obs_to_pi_zero_input(obs, variant)
-            use_residual = should_use_residual(variant, i)
-            rng, actions, residual_flat, obs_dict = compute_action_chunk(
-                variant, agent, agent_dp, rng, obs_pi_zero, obs_dict, use_residual=use_residual
+            use_residual = should_use_residual(variant, i) and (
+                basis is not None or not getattr(variant, 'use_eigenbasis', False)
             )
-            action_list.append(residual_flat)
+            rng, actions, stored_action, obs_dict = compute_action_chunk(
+                variant, agent, agent_dp, rng, obs_pi_zero, obs_dict,
+                use_residual=use_residual, basis=basis,
+            )
+            action_list.append(stored_action)
             obs_list.append(obs_dict)
+            if basis is None and getattr(variant, 'use_eigenbasis', False):
+                pi0_chunks.append(obs_dict['action_diffusion'].reshape(-1).astype(np.float64))
      
         action_t = actions[t % query_frequency]
         if 'libero' in variant.env:
@@ -279,7 +349,8 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
     if variant.env == 'libero' and agent_dp is not None:
         obs_pi_zero = obs_to_pi_zero_input(obs, variant)
         _, _, _, obs_dict = compute_action_chunk(
-            variant, agent, agent_dp, rng, obs_pi_zero, obs_dict, use_residual=False
+            variant, agent, agent_dp, rng, obs_pi_zero, obs_dict,
+            use_residual=False, basis=basis,
         )
     obs_list.append(obs_dict)
     image_list.append(curr_image)
@@ -311,10 +382,11 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
         'is_success': is_success,
         'episode_return': episode_return,
         'images': image_list,
-        'env_steps': t + 1 
+        'env_steps': t + 1,
+        'pi0_chunks': pi0_chunks,
     }
 
-def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None):
+def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None, basis=None):
     query_frequency = variant.query_freq
     print('query frequency', query_frequency)
     max_timesteps = variant.max_timesteps
@@ -354,9 +426,12 @@ def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None):
                 assert agent_dp is not None
                 
                 obs_pi_zero = obs_to_pi_zero_input(obs, variant)
-                use_residual = i > 0
+                use_residual = i > 0 and (
+                    basis is not None or not getattr(variant, 'use_eigenbasis', False)
+                )
                 rng, actions, _, obs_dict = compute_action_chunk(
-                    variant, agent, agent_dp, rng, obs_pi_zero, obs_dict, use_residual=use_residual
+                    variant, agent, agent_dp, rng, obs_pi_zero, obs_dict,
+                    use_residual=use_residual, basis=basis,
                 )
               
             action_t = actions[t % query_frequency]
