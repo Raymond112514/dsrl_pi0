@@ -35,3 +35,6 @@ python3 examples/launch_train_sim.py \
 --hidden_dims 128 \
 --output_dir ${EXP} \
 --task_id 44
+
+# Eigenbasis residual (PCA warmup + K-dim SAC):
+# python3 examples/launch_train_sim.py ... --use_eigenbasis --num_basis 8 --warmup_rollouts 20
