@@ -4,6 +4,12 @@
 
 import argparse
 import sys
+from pathlib import Path
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))              # for `examples.*`
+sys.path.insert(0, str(REPO_ROOT / "LIBERO")) 
+
+import sys
 from examples.train_sim import main
 from jaxrl2.utils.launch_util import parse_training_args
 

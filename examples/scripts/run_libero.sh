@@ -1,6 +1,6 @@
 #!/bin/bash
 proj_name=DSRL_pi0_Libero
-device_id=3
+device_id=0
 
 export DISPLAY=:0
 export MUJOCO_GL=egl
@@ -14,7 +14,7 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 pip install mujoco==3.3.1
 
-python3 examples/launch_train_sim.py \
+python examples/launch_train_sim.py \
 --algorithm pixel_sac \
 --env libero \
 --prefix dsrl_pi0_libero \
