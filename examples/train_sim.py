@@ -154,15 +154,19 @@ def main(variant):
     print('sample action shape', sample_action.shape)
 
     if variant.env == 'libero':
-        config = openpi_config.get_config("pi0_libero")
-        checkpoint_dir = variant.pi0_checkpoint or download.maybe_download("s3://openpi-assets/checkpoints/pi0_libero")
+        config = openpi_config.get_config("pi05_libero")
+        checkpoint_dir = variant.pi0_checkpoint or download.maybe_download("gs://openpi-assets/checkpoints/pi05_libero")
     elif variant.env == 'aloha_cube':
         config = openpi_config.get_config("pi0_aloha_sim")
         checkpoint_dir = download.maybe_download("s3://openpi-assets/checkpoints/pi0_aloha_sim")
     else:
         raise NotImplementedError()
+    variant.pi0_action_horizon = config.model.action_horizon
+    variant.pi0_action_dim = config.model.action_dim
+    if variant.query_freq <= 0:
+        variant.query_freq = variant.pi0_action_horizon
     agent_dp = policy_config.create_trained_policy(config, checkpoint_dir)
-    print("Loaded pi0 policy from %s", checkpoint_dir)
+    print("Loaded pi policy from %s", checkpoint_dir)
     agent = PixelSACLearner(variant.seed, sample_obs, sample_action, **kwargs)
 
     online_buffer_size = variant.max_steps  // variant.multi_grad_step
