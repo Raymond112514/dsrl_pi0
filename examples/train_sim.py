@@ -78,7 +78,9 @@ class DummyEnv(gym.ObservationWrapper):
             elif variant.env == 'aloha_cube':
                 state_dim = 14
             obs_dict['state'] = Box(low=-1.0, high=1.0, shape=(state_dim, 1), dtype=np.float32)
-        if variant.env == 'libero':
+        # Residual RL (Libero + Aloha): condition on base pi0 chunk; SAC acts in
+        # residual space (full chunk) or K-dim PCA coefficient space.
+        if variant.env in ('libero', 'aloha_cube'):
             residual_dim = variant.pi0_action_horizon * variant.env_action_dim
             obs_dict['action_diffusion'] = Box(
                 low=-np.inf, high=np.inf, shape=(residual_dim, 1), dtype=np.float32
@@ -89,11 +91,15 @@ class DummyEnv(gym.ObservationWrapper):
                 sac_dim = residual_dim
             self.action_space = Box(low=-1, high=1, shape=(1, sac_dim), dtype=np.float32)
         else:
+            # Classic noise-steering DSRL (32-D pi0 noise).
             self.action_space = Box(low=-1, high=1, shape=(1, 32,), dtype=np.float32)
         self.observation_space = Dict(obs_dict)
 
 def build_exp_name(variant):
-    parts = [f"task{variant.task_id}"]
+    if variant.env == 'libero':
+        parts = [f"task{variant.task_id}"]
+    else:
+        parts = [variant.env]
     if getattr(variant, 'use_eigenbasis', False):
         parts.append(f"K{variant.num_basis}")
     return "_".join(parts)
@@ -106,7 +112,25 @@ def load_basis_if_provided(variant):
     if basis_path and os.path.isfile(basis_path):
         from examples.residual_basis import ResidualActionBasis
         print(f"Loading PCA basis from {basis_path}")
-        return ResidualActionBasis.load(basis_path)
+        basis = ResidualActionBasis.load(basis_path)
+        num_basis = int(variant.num_basis)
+        if basis.num_basis > num_basis:
+            print(f"Slicing loaded basis from K={basis.num_basis} to K={num_basis}")
+            explained = basis.explained_variance_ratio
+            if explained is not None:
+                explained = explained[:num_basis]
+            basis = ResidualActionBasis(
+                mean=basis.mean,
+                V=basis.V[:, :num_basis],
+                query_freq=basis.query_freq,
+                action_dim=basis.action_dim,
+                explained_variance_ratio=explained,
+            )
+        elif basis.num_basis < num_basis:
+            raise ValueError(
+                f"Loaded basis has K={basis.num_basis} but --num_basis={num_basis}"
+            )
+        return basis
     return None
 
 def main(variant):
@@ -172,8 +196,11 @@ def main(variant):
         config = openpi_config.get_config("pi05_libero")
         checkpoint_dir = variant.pi0_checkpoint or download.maybe_download("gs://openpi-assets/checkpoints/pi05_libero")
     elif variant.env == 'aloha_cube':
+        # Same pi0 Aloha-sim checkpoint used by openpi (main/residual_rl branches + serve_policy).
         config = openpi_config.get_config("pi0_aloha_sim")
-        checkpoint_dir = download.maybe_download("s3://openpi-assets/checkpoints/pi0_aloha_sim")
+        checkpoint_dir = variant.pi0_checkpoint or download.maybe_download(
+            "gs://openpi-assets/checkpoints/pi0_aloha_sim"
+        )
     else:
         raise NotImplementedError()
     variant.pi0_action_horizon = config.model.action_horizon
@@ -182,6 +209,9 @@ def main(variant):
         variant.query_freq = variant.pi0_action_horizon
     if variant.env == 'libero':
         variant.env_action_dim = 7
+    elif variant.env == 'aloha_cube':
+        variant.env_action_dim = 14
+    if variant.env in ('libero', 'aloha_cube'):
         if not hasattr(variant, 'residual_scale') or variant.residual_scale is None:
             variant.residual_scale = 0.01
     agent_dp = policy_config.create_trained_policy(config, checkpoint_dir)
@@ -201,7 +231,7 @@ def main(variant):
         variant.seed,
         sample_obs,
         sample_action,
-        zero_init_actor_mean=(variant.env == 'libero'),
+        zero_init_actor_mean=(variant.env in ('libero', 'aloha_cube')),
         **kwargs,
     )
 

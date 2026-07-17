@@ -346,7 +346,7 @@ def collect_traj(variant, agent, env, i, agent_dp=None, basis=None):
         'pixels': curr_image[np.newaxis, ..., np.newaxis],
         'state': qpos[np.newaxis, ..., np.newaxis],
     }
-    if variant.env == 'libero' and agent_dp is not None:
+    if variant.env in ('libero', 'aloha_cube') and agent_dp is not None:
         obs_pi_zero = obs_to_pi_zero_input(obs, variant)
         _, _, _, obs_dict = compute_action_chunk(
             variant, agent, agent_dp, rng, obs_pi_zero, obs_dict,

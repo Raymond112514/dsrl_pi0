@@ -1,5 +1,5 @@
 #!/bin/bash
-proj_name=DSRL_pi0_Aloha
+proj_name=DSRL_pi0_Aloha_basis
 device_id=0
 
 export DISPLAY=:0
@@ -17,12 +17,13 @@ export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/openpi/src:${PYTHONPATH:-}"
 
 pip install mujoco==2.3.7
 
-# Full residual RL: SAC outputs a (50 x 14) = 700-D residual on top of pi0_aloha_sim.
+# Eigenbasis residual: SAC learns K PCA coeffs; a = a_base + lambda * V @ c.
+# Default: fit basis online from warmup rollouts (K=8, ~96% variance on Aloha PCA).
 python3 examples/launch_train_sim.py \
   --algorithm pixel_sac \
   --env aloha_cube \
-  --prefix dsrl_pi0_aloha \
-  --wandb_project ${proj_name} \
+  --prefix dsrl_pi0_aloha_basis \
+  --wandb_project DSRL_pi0_Aloha \
   --batch_size 256 \
   --discount 0.999 \
   --seed 0 \
@@ -37,7 +38,11 @@ python3 examples/launch_train_sim.py \
   --residual_scale 0.01 \
   --query_freq 50 \
   --hidden_dims 128 \
-  --output_dir ${EXP}
+  --output_dir "${EXP}" \
+  --use_eigenbasis \
+  --num_basis 8 \
+  --warmup_rollouts 20
 
-# Eigenbasis residual (preferred for Aloha; see run_aloha_basis.sh):
-# bash examples/scripts/run_aloha_basis.sh
+# Optional: reuse precomputed PCA (K=15 @ 99% variance; sliced to --num_basis):
+#   --basis_path success_rate/eigenvectors/pi0_aloha_sim_pca99/action_basis.npz \
+#   --num_basis 8
