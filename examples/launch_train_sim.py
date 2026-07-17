@@ -43,8 +43,13 @@ if __name__ == '__main__':
         action='store_true',
         help='Train SAC in K-dim PCA coefficient space (a = a_base + lambda * V @ c)',
     )
-    parser.add_argument('--num_basis', default=8, type=int, help='Number of PCA components for eigenbasis residual')
-    parser.add_argument('--warmup_rollouts', default=20, type=int, help='Rollouts before PCA fit and SAC updates')
+    parser.add_argument(
+        '--use_random_basis',
+        action='store_true',
+        help='Ablation: same K-dim residual as eigenbasis but with a random orthonormal V',
+    )
+    parser.add_argument('--num_basis', default=8, type=int, help='Number of basis components for projected residual')
+    parser.add_argument('--warmup_rollouts', default=20, type=int, help='Rollouts before PCA fit (eigenbasis) and SAC updates')
     parser.add_argument('--basis_path', default='', help='Optional pre-fit residual_basis.npz (skips online PCA)')
 
     train_args_dict = dict(

@@ -7,6 +7,8 @@ from openpi_client import image_tools
 import math
 import PIL
 
+from examples.residual_basis import uses_projected_basis
+
 def print_green(text):
     print(f'\033[92m{text}\033[0m')
 
@@ -98,7 +100,7 @@ def compute_action_chunk(variant, agent, agent_dp, rng, obs_pi_zero, obs_dict, *
     a_base = agent_dp.infer(obs_pi_zero, noise=noise)["actions"]
     obs_dict = {**obs_dict, "action_diffusion": a_base.reshape(1, -1, 1)}
 
-    if getattr(variant, 'use_eigenbasis', False):
+    if uses_projected_basis(variant):
         num_basis = variant.num_basis
         if use_residual and basis is not None:
             coeffs = agent.sample_actions(obs_dict)
@@ -123,13 +125,16 @@ def compute_action_chunk(variant, agent, agent_dp, rng, obs_pi_zero, obs_dict, *
 
 
 def log_basis_explained_variance(wandb_logger, basis, step=0):
-    if basis.explained_variance_ratio is None:
-        return
-    explained = np.asarray(basis.explained_variance_ratio, dtype=np.float64)
     metrics = {
         'basis/num_components': basis.num_basis,
-        'basis/total_explained_variance': float(explained.sum()),
+        'basis/type': 0 if getattr(basis, 'basis_type', 'pca') == 'pca' else 1,
     }
+    if basis.explained_variance_ratio is None:
+        wandb_logger.log(metrics, step=step)
+        print_green(f'Basis type={getattr(basis, "basis_type", "pca")} K={basis.num_basis} D={basis.feature_dim}')
+        return
+    explained = np.asarray(basis.explained_variance_ratio, dtype=np.float64)
+    metrics['basis/total_explained_variance'] = float(explained.sum())
     for idx, ratio in enumerate(explained):
         metrics[f'basis/pc_{idx}_explained_variance'] = float(ratio)
     wandb_logger.log(metrics, step=step)
@@ -316,7 +321,7 @@ def collect_traj(variant, agent, env, i, agent_dp=None, basis=None):
             rng, key = jax.random.split(rng)
             obs_pi_zero = obs_to_pi_zero_input(obs, variant)
             use_residual = should_use_residual(variant, i) and (
-                basis is not None or not getattr(variant, 'use_eigenbasis', False)
+                basis is not None or not uses_projected_basis(variant)
             )
             rng, actions, stored_action, obs_dict = compute_action_chunk(
                 variant, agent, agent_dp, rng, obs_pi_zero, obs_dict,
@@ -427,7 +432,7 @@ def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None, ba
                 
                 obs_pi_zero = obs_to_pi_zero_input(obs, variant)
                 use_residual = i > 0 and (
-                    basis is not None or not getattr(variant, 'use_eigenbasis', False)
+                    basis is not None or not uses_projected_basis(variant)
                 )
                 rng, actions, _, obs_dict = compute_action_chunk(
                     variant, agent, agent_dp, rng, obs_pi_zero, obs_dict,

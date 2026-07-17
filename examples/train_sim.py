@@ -37,7 +37,7 @@ from jax.experimental.compilation_cache import compilation_cache
 from openpi.training import config as openpi_config
 from openpi.policies import policy_config
 from openpi.shared import download
-
+from examples.residual_basis import ResidualActionBasis, uses_projected_basis
 home_dir = os.environ['HOME']
 compilation_cache.initialize_cache(os.path.join(home_dir, 'jax_compilation_cache'))
 
@@ -85,7 +85,7 @@ class DummyEnv(gym.ObservationWrapper):
             obs_dict['action_diffusion'] = Box(
                 low=-np.inf, high=np.inf, shape=(residual_dim, 1), dtype=np.float32
             )
-            if getattr(variant, 'use_eigenbasis', False):
+            if uses_projected_basis(variant):
                 sac_dim = variant.num_basis
             else:
                 sac_dim = residual_dim
@@ -100,17 +100,38 @@ def build_exp_name(variant):
         parts = [f"task{variant.task_id}"]
     else:
         parts = [variant.env]
-    if getattr(variant, 'use_eigenbasis', False):
-        parts.append(f"K{variant.num_basis}")
+    if uses_projected_basis(variant):
+        tag = "rand" if getattr(variant, 'use_random_basis', False) else "pca"
+        parts.append(f"K{variant.num_basis}_{tag}")
     return "_".join(parts)
 
 
-def load_basis_if_provided(variant):
+def maybe_init_basis(variant):
+    """Load PCA basis, or create a random orthonormal basis for the ablation."""
+    if getattr(variant, 'use_eigenbasis', False) and getattr(variant, 'use_random_basis', False):
+        raise ValueError("Pass only one of --use_eigenbasis / --use_random_basis")
+
+    if getattr(variant, 'use_random_basis', False):
+        if variant.get('basis_path', ''):
+            raise ValueError("--basis_path is only supported with --use_eigenbasis")
+        action_dim = int(variant.env_action_dim)
+        # Prefer query_freq so residual reshape matches collect; falls back to horizon.
+        query_freq = int(variant.query_freq if variant.query_freq > 0 else variant.pi0_action_horizon)
+        basis = ResidualActionBasis.random(
+            num_basis=int(variant.num_basis),
+            query_freq=query_freq,
+            action_dim=action_dim,
+            seed=int(variant.seed),
+        )
+        save_path = os.path.join(variant.outputdir, "residual_basis.npz")
+        basis.save(save_path)
+        print(f"Initialized random orthonormal basis K={basis.num_basis} D={basis.feature_dim} -> {save_path}")
+        return basis
+
     if not getattr(variant, 'use_eigenbasis', False):
         return None
     basis_path = variant.get('basis_path', '')
     if basis_path and os.path.isfile(basis_path):
-        from examples.residual_basis import ResidualActionBasis
         print(f"Loading PCA basis from {basis_path}")
         basis = ResidualActionBasis.load(basis_path)
         num_basis = int(variant.num_basis)
@@ -125,6 +146,7 @@ def load_basis_if_provided(variant):
                 query_freq=basis.query_freq,
                 action_dim=basis.action_dim,
                 explained_variance_ratio=explained,
+                basis_type=basis.basis_type,
             )
         elif basis.num_basis < num_basis:
             raise ValueError(
@@ -239,7 +261,7 @@ def main(variant):
     online_replay_buffer = ReplayBuffer(dummy_env.observation_space, dummy_env.action_space, int(online_buffer_size))
     replay_buffer = online_replay_buffer
     replay_buffer.seed(variant.seed)
-    variant.basis = load_basis_if_provided(variant)
+    variant.basis = maybe_init_basis(variant)
     if variant.basis is not None:
         log_basis_explained_variance(wandb_logger, variant.basis, step=0)
     trajwise_alternating_training_loop(variant, agent, env, eval_env, online_replay_buffer, replay_buffer, wandb_logger, shard_fn=shard_fn, agent_dp=agent_dp)

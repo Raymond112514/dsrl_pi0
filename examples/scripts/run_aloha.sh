@@ -13,7 +13,7 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${REPO_ROOT}"
-export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/openpi/src:${PYTHONPATH:-}"
+export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/LIBERO:${REPO_ROOT}/openpi/src:${PYTHONPATH:-}"
 
 pip install mujoco==2.3.7
 

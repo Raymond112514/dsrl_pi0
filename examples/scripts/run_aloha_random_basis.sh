@@ -1,5 +1,5 @@
 #!/bin/bash
-proj_name=DSRL_pi0_Aloha_basis
+proj_name=DSRL_pi0_Aloha_random_basis
 device_id=0
 
 export DISPLAY=:0
@@ -13,16 +13,16 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${REPO_ROOT}"
+# LIBERO is still imported by train_sim.py even for Aloha.
 export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/LIBERO:${REPO_ROOT}/openpi/src:${PYTHONPATH:-}"
 
 pip install mujoco==2.3.7
 
-# Eigenbasis residual: SAC learns K PCA coeffs; a = a_base + lambda * V @ c.
-# Default: fit basis online from warmup rollouts (K=8, ~96% variance on Aloha PCA).
+# Ablation: K-dim residual with random orthonormal V (same K as PCA Aloha runs).
 python3 examples/launch_train_sim.py \
   --algorithm pixel_sac \
   --env aloha_cube \
-  --prefix dsrl_pi0_aloha_basis \
+  --prefix dsrl_pi0_aloha_rand_basis \
   --wandb_project DSRL_pi0_Aloha \
   --batch_size 256 \
   --discount 0.999 \
@@ -39,10 +39,6 @@ python3 examples/launch_train_sim.py \
   --query_freq 50 \
   --hidden_dims 128 \
   --output_dir "${EXP}" \
-  --use_eigenbasis \
+  --use_random_basis \
   --num_basis 8 \
   --warmup_rollouts 20
-
-# Optional: reuse precomputed PCA (K=15 @ 99% variance; sliced to --num_basis):
-#   --basis_path success_rate/eigenvectors/pi0_aloha_sim_pca99/action_basis.npz \
-#   --num_basis 8
