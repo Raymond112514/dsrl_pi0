@@ -94,7 +94,10 @@ def obs_to_qpos(obs, variant):
         raise NotImplementedError()
     return qpos
 
-def compute_action_chunk(variant, agent, agent_dp, rng, obs_pi_zero, obs_dict, *, use_residual, basis=None):
+def compute_action_chunk(
+    variant, agent, agent_dp, rng, obs_pi_zero, obs_dict, *,
+    use_residual, basis=None, residual_action_scale=1.0,
+):
     rng, key = jax.random.split(rng)
     noise = jax.random.normal(key, (1, variant.pi0_action_horizon, variant.pi0_action_dim))
     a_base = agent_dp.infer(obs_pi_zero, noise=noise)["actions"]
@@ -106,6 +109,7 @@ def compute_action_chunk(variant, agent, agent_dp, rng, obs_pi_zero, obs_dict, *
             coeffs = agent.sample_actions(obs_dict)
             if coeffs.ndim == 1:
                 coeffs = coeffs.reshape(1, -1)
+            coeffs = residual_action_scale * coeffs
             res_chunk = basis.coeffs_to_chunk(coeffs[0], variant.residual_scale)
             actions = a_base + res_chunk
             stored_action = coeffs.astype(np.float32)
@@ -116,8 +120,9 @@ def compute_action_chunk(variant, agent, agent_dp, rng, obs_pi_zero, obs_dict, *
 
     if use_residual:
         a_res = agent.sample_actions(obs_dict).reshape(a_base.shape)
-        actions = a_base + variant.residual_scale * a_res
-        residual_flat = a_res.reshape(1, -1)
+        scaled_residual = residual_action_scale * a_res
+        actions = a_base + variant.residual_scale * scaled_residual
+        residual_flat = scaled_residual.reshape(1, -1)
     else:
         actions = a_base
         residual_flat = np.zeros((1, np.prod(a_base.shape)), dtype=np.float32)
@@ -161,7 +166,9 @@ def fit_basis_from_warmup_chunks(variant, warmup_chunks):
     return basis
 
 def should_use_residual(variant, i):
-    if getattr(variant, 'collect_with_residual', False):
+    if getattr(variant, 'collect_with_residual', False) or (
+        getattr(variant, 'init_residual', False) and i == 0
+    ):
         return True
     return i > 0
 
@@ -325,7 +332,13 @@ def collect_traj(variant, agent, env, i, agent_dp=None, basis=None):
             )
             rng, actions, stored_action, obs_dict = compute_action_chunk(
                 variant, agent, agent_dp, rng, obs_pi_zero, obs_dict,
-                use_residual=use_residual, basis=basis,
+                use_residual=use_residual,
+                basis=basis,
+                residual_action_scale=(
+                    getattr(variant, 'init_scale', 1.0)
+                    if getattr(variant, 'init_residual', False) and i == 0
+                    else 1.0
+                ),
             )
             action_list.append(stored_action)
             obs_list.append(obs_dict)

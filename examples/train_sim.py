@@ -253,7 +253,10 @@ def main(variant):
         variant.seed,
         sample_obs,
         sample_action,
-        zero_init_actor_mean=(variant.env in ('libero', 'aloha_cube')),
+        zero_init_actor_mean=(
+            variant.env in ('libero', 'aloha_cube')
+            and not getattr(variant, 'init_residual', False)
+        ),
         **kwargs,
     )
 
