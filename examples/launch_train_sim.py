@@ -32,6 +32,7 @@ if __name__ == '__main__':
     parser.add_argument('--task_id', default=44, help='task id', type=int)
     parser.add_argument('--output_dir', default='', help='Base directory for experiment outputs')
     parser.add_argument('--pi0_checkpoint', default='', help='Local pi0 checkpoint directory; download default if unset or missing')
+    parser.add_argument('--act_checkpoint', default='lerobot/act_aloha_sim_insertion_human', help='LeRobot ACT checkpoint for aloha_insertion')
     parser.add_argument('--residual_scale', type=float, default=0.01, help='Scale factor for residual actions')
     parser.add_argument(
         '--init_residual',

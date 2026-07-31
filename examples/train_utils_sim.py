@@ -35,7 +35,7 @@ def obs_to_img(obs, variant):
     '''
     if variant.env == 'libero':
         curr_image = obs["agentview_image"][::-1, ::-1]
-    elif variant.env == 'aloha_cube':
+    elif variant.env in ('aloha_cube', 'aloha_insertion'):
         curr_image = obs["pixels"]["top"]
     else:
         raise NotImplementedError()
@@ -75,6 +75,11 @@ def obs_to_pi_zero_input(obs, variant):
             "state": obs["agent_pos"],
             "images": {"cam_high": np.transpose(img, (2,0,1))}
         }
+    elif variant.env == 'aloha_insertion':
+        obs_pi_zero = {
+            "agent_pos": np.asarray(obs["agent_pos"], dtype=np.float32),
+            "pixels": {"top": np.ascontiguousarray(obs["pixels"]["top"])},
+        }
     else:
         raise NotImplementedError()
     return obs_pi_zero
@@ -88,7 +93,7 @@ def obs_to_qpos(obs, variant):
                 obs["robot0_gripper_qpos"],
             )
         )
-    elif variant.env == 'aloha_cube':
+    elif variant.env in ('aloha_cube', 'aloha_insertion'):
         qpos = obs["agent_pos"]
     else:
         raise NotImplementedError()
@@ -100,7 +105,10 @@ def compute_action_chunk(
 ):
     rng, key = jax.random.split(rng)
     noise = jax.random.normal(key, (1, variant.pi0_action_horizon, variant.pi0_action_dim))
-    a_base = agent_dp.infer(obs_pi_zero, noise=noise)["actions"]
+    a_base = np.asarray(agent_dp.infer(obs_pi_zero, noise=noise)["actions"], dtype=np.float32)
+    expected_shape = (variant.pi0_action_horizon, variant.env_action_dim)
+    if a_base.shape != expected_shape:
+        raise ValueError(f"Base policy returned {a_base.shape}, expected {expected_shape}")
     obs_dict = {**obs_dict, "action_diffusion": a_base.reshape(1, -1, 1)}
 
     if uses_projected_basis(variant):
@@ -364,7 +372,7 @@ def collect_traj(variant, agent, env, i, agent_dp=None, basis=None):
         'pixels': curr_image[np.newaxis, ..., np.newaxis],
         'state': qpos[np.newaxis, ..., np.newaxis],
     }
-    if variant.env in ('libero', 'aloha_cube') and agent_dp is not None:
+    if variant.env in ('libero', 'aloha_cube', 'aloha_insertion') and agent_dp is not None:
         obs_pi_zero = obs_to_pi_zero_input(obs, variant)
         _, _, _, obs_dict = compute_action_chunk(
             variant, agent, agent_dp, rng, obs_pi_zero, obs_dict,

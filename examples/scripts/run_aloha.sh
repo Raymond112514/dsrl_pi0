@@ -1,6 +1,6 @@
 #!/bin/bash
 proj_name=DSRL_pi0_Aloha
-device_id=0
+device_id=1
 
 export DISPLAY=:0
 export MUJOCO_GL=egl
@@ -37,7 +37,8 @@ python3 examples/launch_train_sim.py \
   --residual_scale 0.01 \
   --query_freq 50 \
   --hidden_dims 128 \
-  --output_dir ${EXP}
+  --output_dir ${EXP} \
+  --init_residual 
 
 # Eigenbasis residual (preferred for Aloha; see run_aloha_basis.sh):
 # bash examples/scripts/run_aloha_basis.sh

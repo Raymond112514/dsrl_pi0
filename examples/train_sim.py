@@ -75,12 +75,12 @@ class DummyEnv(gym.ObservationWrapper):
         if variant.add_states:
             if variant.env == 'libero':
                 state_dim = 8
-            elif variant.env == 'aloha_cube':
+            elif variant.env in ('aloha_cube', 'aloha_insertion'):
                 state_dim = 14
             obs_dict['state'] = Box(low=-1.0, high=1.0, shape=(state_dim, 1), dtype=np.float32)
         # Residual RL (Libero + Aloha): condition on base pi0 chunk; SAC acts in
         # residual space (full chunk) or K-dim PCA coefficient space.
-        if variant.env in ('libero', 'aloha_cube'):
+        if variant.env in ('libero', 'aloha_cube', 'aloha_insertion'):
             residual_dim = variant.pi0_action_horizon * variant.env_action_dim
             obs_dict['action_diffusion'] = Box(
                 low=-np.inf, high=np.inf, shape=(residual_dim, 1), dtype=np.float32
@@ -134,6 +134,14 @@ def maybe_init_basis(variant):
     if basis_path and os.path.isfile(basis_path):
         print(f"Loading PCA basis from {basis_path}")
         basis = ResidualActionBasis.load(basis_path)
+        if (
+            basis.query_freq != int(variant.query_freq)
+            or basis.action_dim != int(variant.env_action_dim)
+        ):
+            raise ValueError(
+                f"Basis shape is ({basis.query_freq}, {basis.action_dim}); expected "
+                f"({variant.query_freq}, {variant.env_action_dim})"
+            )
         num_basis = int(variant.num_basis)
         if basis.num_basis > num_basis:
             print(f"Slicing loaded basis from K={basis.num_basis} to K={num_basis}")
@@ -212,8 +220,19 @@ def main(variant):
         eval_env = copy.deepcopy(env)
         variant.env_max_reward = 4
         variant.max_timesteps = 400
+    elif variant.env == 'aloha_insertion':
+        env = gym.make(
+            "gym_aloha/AlohaInsertion-v0",
+            obs_type="pixels_agent_pos",
+            render_mode="rgb_array",
+            max_episode_steps=400,
+        )
+        eval_env = copy.deepcopy(env)
+        variant.env_max_reward = 4
+        variant.max_timesteps = 400
         
 
+    agent_dp = None
     if variant.env == 'libero':
         config = openpi_config.get_config("pi05_libero")
         checkpoint_dir = variant.pi0_checkpoint or download.maybe_download("gs://openpi-assets/checkpoints/pi05_libero")
@@ -223,21 +242,35 @@ def main(variant):
         checkpoint_dir = variant.pi0_checkpoint or download.maybe_download(
             "gs://openpi-assets/checkpoints/pi0_aloha_sim"
         )
+    elif variant.env == 'aloha_insertion':
+        from aloha_residual.act_policy import ACTChunkPolicy
+
+        checkpoint_dir = variant.act_checkpoint
+        agent_dp = ACTChunkPolicy(checkpoint_dir)
+        variant.pi0_action_horizon = agent_dp.action_horizon
+        variant.pi0_action_dim = agent_dp.action_dim
     else:
         raise NotImplementedError()
-    variant.pi0_action_horizon = config.model.action_horizon
-    variant.pi0_action_dim = config.model.action_dim
+    if agent_dp is None:
+        variant.pi0_action_horizon = config.model.action_horizon
+        variant.pi0_action_dim = config.model.action_dim
     if variant.query_freq <= 0:
         variant.query_freq = variant.pi0_action_horizon
+    if variant.env == 'aloha_insertion' and variant.query_freq != variant.pi0_action_horizon:
+        raise ValueError(
+            f"--query_freq must match the base action horizon "
+            f"({variant.pi0_action_horizon}), got {variant.query_freq}"
+        )
     if variant.env == 'libero':
         variant.env_action_dim = 7
-    elif variant.env == 'aloha_cube':
+    elif variant.env in ('aloha_cube', 'aloha_insertion'):
         variant.env_action_dim = 14
-    if variant.env in ('libero', 'aloha_cube'):
+    if variant.env in ('libero', 'aloha_cube', 'aloha_insertion'):
         if not hasattr(variant, 'residual_scale') or variant.residual_scale is None:
             variant.residual_scale = 0.01
-    agent_dp = policy_config.create_trained_policy(config, checkpoint_dir)
-    print("Loaded pi policy from %s", checkpoint_dir)
+    if agent_dp is None:
+        agent_dp = policy_config.create_trained_policy(config, checkpoint_dir)
+    print("Loaded base policy from %s", checkpoint_dir)
 
     group_name = variant.prefix + '_' + variant.launch_group_id
     wandb_output_dir = tempfile.mkdtemp()
@@ -254,7 +287,7 @@ def main(variant):
         sample_obs,
         sample_action,
         zero_init_actor_mean=(
-            variant.env in ('libero', 'aloha_cube')
+            variant.env in ('libero', 'aloha_cube', 'aloha_insertion')
             and not getattr(variant, 'init_residual', False)
         ),
         **kwargs,
