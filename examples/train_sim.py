@@ -78,10 +78,11 @@ class DummyEnv(gym.ObservationWrapper):
             elif variant.env in ('aloha_cube', 'aloha_insertion'):
                 state_dim = 14
             obs_dict['state'] = Box(low=-1.0, high=1.0, shape=(state_dim, 1), dtype=np.float32)
-        # Residual RL (Libero + Aloha): condition on base pi0 chunk; SAC acts in
-        # residual space (full chunk) or K-dim PCA coefficient space.
+        # Residual RL (Libero + Aloha): condition on the executed prefix of the
+        # base chunk (length query_freq); SAC acts in that residual space or
+        # K-dim PCA coefficient space.
         if variant.env in ('libero', 'aloha_cube', 'aloha_insertion'):
-            residual_dim = variant.pi0_action_horizon * variant.env_action_dim
+            residual_dim = variant.query_freq * variant.env_action_dim
             obs_dict['action_diffusion'] = Box(
                 low=-np.inf, high=np.inf, shape=(residual_dim, 1), dtype=np.float32
             )
@@ -256,10 +257,16 @@ def main(variant):
         variant.pi0_action_dim = config.model.action_dim
     if variant.query_freq <= 0:
         variant.query_freq = variant.pi0_action_horizon
-    if variant.env == 'aloha_insertion' and variant.query_freq != variant.pi0_action_horizon:
+    if not (1 <= int(variant.query_freq) <= int(variant.pi0_action_horizon)):
         raise ValueError(
-            f"--query_freq must match the base action horizon "
-            f"({variant.pi0_action_horizon}), got {variant.query_freq}"
+            f"--query_freq must be in [1, action_horizon={variant.pi0_action_horizon}], "
+            f"got {variant.query_freq}"
+        )
+    if int(variant.query_freq) != int(variant.pi0_action_horizon):
+        print(
+            f"Using query_freq={variant.query_freq} < action_horizon="
+            f"{variant.pi0_action_horizon}; residual/open-loop use the first "
+            f"{variant.query_freq} steps of each base chunk."
         )
     if variant.env == 'libero':
         variant.env_action_dim = 7

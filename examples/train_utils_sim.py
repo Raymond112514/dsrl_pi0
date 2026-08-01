@@ -105,10 +105,13 @@ def compute_action_chunk(
 ):
     rng, key = jax.random.split(rng)
     noise = jax.random.normal(key, (1, variant.pi0_action_horizon, variant.pi0_action_dim))
-    a_base = np.asarray(agent_dp.infer(obs_pi_zero, noise=noise)["actions"], dtype=np.float32)
+    a_base_full = np.asarray(agent_dp.infer(obs_pi_zero, noise=noise)["actions"], dtype=np.float32)
     expected_shape = (variant.pi0_action_horizon, variant.env_action_dim)
-    if a_base.shape != expected_shape:
-        raise ValueError(f"Base policy returned {a_base.shape}, expected {expected_shape}")
+    if a_base_full.shape != expected_shape:
+        raise ValueError(f"Base policy returned {a_base_full.shape}, expected {expected_shape}")
+    # Execute / residual only over the first query_freq steps of the base chunk.
+    query_freq = int(variant.query_freq)
+    a_base = a_base_full[:query_freq]
     obs_dict = {**obs_dict, "action_diffusion": a_base.reshape(1, -1, 1)}
 
     if uses_projected_basis(variant):

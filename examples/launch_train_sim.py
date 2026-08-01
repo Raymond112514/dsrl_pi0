@@ -28,7 +28,17 @@ if __name__ == '__main__':
     parser.add_argument('--suffix', default='', help='suffix to use for wandb')
     parser.add_argument('--multi_grad_step', default=1, help='Number of graident steps to take per environment step, aka UTD', type=int)
     parser.add_argument('--resize_image', default=-1, help='the size of image if need resizing', type=int)
-    parser.add_argument('--query_freq', default=-1, help='query frequency', type=int)
+    parser.add_argument(
+        '--query_freq',
+        default=-1,
+        help=(
+            'Env steps between base-policy queries. Residual/open-loop use the '
+            'first query_freq steps of each base chunk. Default: full action '
+            'horizon if unset (-1). ACT insertion launchers default to 50 '
+            '(pi0 Aloha); ACT horizon is still 100.'
+        ),
+        type=int,
+    )
     parser.add_argument('--task_id', default=44, help='task id', type=int)
     parser.add_argument('--output_dir', default='', help='Base directory for experiment outputs')
     parser.add_argument('--pi0_checkpoint', default='', help='Local pi0 checkpoint directory; download default if unset or missing')
