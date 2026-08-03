@@ -1,16 +1,21 @@
-from audioop import cross
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
 from flax.training.train_state import TrainState
 
+from jaxrl2.agents.pixel_sac.executed_action_q import residual_to_executed, strip_action_diffusion
 from jaxrl2.data.dataset import DatasetDict
 from jaxrl2.types import Params, PRNGKey
 
 
 def update_actor(key: PRNGKey, actor: TrainState, critic: TrainState,
-                 temp: TrainState, batch: DatasetDict, cross_norm:bool=False, critic_reduction:str='min') -> Tuple[TrainState, Dict[str, float]]:
+                 temp: TrainState, batch: DatasetDict, cross_norm:bool=False, critic_reduction:str='min',
+                 q_base_action: bool = False,
+                 residual_scale: float = 1.0,
+                 use_basis: bool = False,
+                 basis_V: Optional[jnp.ndarray] = None,
+) -> Tuple[TrainState, Dict[str, float]]:
     
     key, key_act = jax.random.split(key, num=2)
 
@@ -38,11 +43,24 @@ def update_actor(key: PRNGKey, actor: TrainState, critic: TrainState,
         
         actions, log_probs = dist.sample_and_log_prob(seed=key_act)
 
+        if q_base_action:
+            critic_obs = strip_action_diffusion(batch['observations'])
+            critic_actions = residual_to_executed(
+                actions,
+                batch['observations']['action_diffusion'],
+                residual_scale,
+                use_basis,
+                basis_V,
+            )
+        else:
+            critic_obs = batch['observations']
+            critic_actions = actions
+
         if hasattr(critic, 'batch_stats') and critic.batch_stats is not None:
-            qs, _ = critic.apply_fn({'params': critic.params, 'batch_stats': critic.batch_stats}, batch['observations'],
-                            actions, mutable=['batch_stats'])
+            qs, _ = critic.apply_fn({'params': critic.params, 'batch_stats': critic.batch_stats}, critic_obs,
+                            critic_actions, mutable=['batch_stats'])
         else:    
-            qs = critic.apply_fn({'params': critic.params}, batch['observations'], actions)
+            qs = critic.apply_fn({'params': critic.params}, critic_obs, critic_actions)
         
         if critic_reduction == 'min':
             q = qs.min(axis=0)

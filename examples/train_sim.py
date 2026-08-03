@@ -104,6 +104,8 @@ def build_exp_name(variant):
     if uses_projected_basis(variant):
         tag = "rand" if getattr(variant, 'use_random_basis', False) else "pca"
         parts.append(f"K{variant.num_basis}_{tag}")
+    if getattr(variant, 'q_base_action', False):
+        parts.append("qbase")
     return "_".join(parts)
 
 
@@ -289,6 +291,31 @@ def main(variant):
     print('sample obs shapes', [(k, v.shape) for k, v in sample_obs.items()])
     print('sample action shape', sample_action.shape)
 
+    variant.basis = maybe_init_basis(variant)
+    if variant.basis is not None:
+        log_basis_explained_variance(wandb_logger, variant.basis, step=0)
+
+    q_base_action = bool(getattr(variant, 'q_base_action', False))
+    critic_observations = sample_obs
+    critic_actions = sample_action
+    basis_V = None
+    if q_base_action:
+        if 'action_diffusion' not in sample_obs:
+            raise ValueError('--q_base_action requires residual RL envs with action_diffusion')
+        # Critic is BoN-compatible: no base chunk in obs; action is executed chunk.
+        critic_observations = {k: v for k, v in sample_obs.items() if k != 'action_diffusion'}
+        exec_dim = int(variant.query_freq) * int(variant.env_action_dim)
+        critic_actions = add_batch_dim(
+            np.zeros((1, exec_dim), dtype=np.float32)
+        )
+        if variant.basis is not None:
+            basis_V = variant.basis.V
+        print(
+            'q_base_action enabled: '
+            f'critic_obs={list(critic_observations.keys())}, '
+            f'critic_action_dim={exec_dim}'
+        )
+
     agent = PixelSACLearner(
         variant.seed,
         sample_obs,
@@ -297,6 +324,12 @@ def main(variant):
             variant.env in ('libero', 'aloha_cube', 'aloha_insertion')
             and not getattr(variant, 'init_residual', False)
         ),
+        q_base_action=q_base_action,
+        residual_scale=float(getattr(variant, 'residual_scale', 1.0)),
+        use_basis=uses_projected_basis(variant),
+        basis_V=basis_V,
+        critic_observations=critic_observations,
+        critic_actions=critic_actions,
         **kwargs,
     )
 
@@ -304,8 +337,5 @@ def main(variant):
     online_replay_buffer = ReplayBuffer(dummy_env.observation_space, dummy_env.action_space, int(online_buffer_size))
     replay_buffer = online_replay_buffer
     replay_buffer.seed(variant.seed)
-    variant.basis = maybe_init_basis(variant)
-    if variant.basis is not None:
-        log_basis_explained_variance(wandb_logger, variant.basis, step=0)
     trajwise_alternating_training_loop(variant, agent, env, eval_env, online_replay_buffer, replay_buffer, wandb_logger, shard_fn=shard_fn, agent_dp=agent_dp)
  

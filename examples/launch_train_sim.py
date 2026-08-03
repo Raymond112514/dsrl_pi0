@@ -73,6 +73,15 @@ if __name__ == '__main__':
     parser.add_argument('--num_basis', default=8, type=int, help='Number of basis components for projected residual')
     parser.add_argument('--warmup_rollouts', default=20, type=int, help='Rollouts before PCA fit (eigenbasis) and SAC updates')
     parser.add_argument('--basis_path', default='', help='Optional pre-fit residual_basis.npz (skips online PCA)')
+    parser.add_argument(
+        '--q_base_action',
+        action='store_true',
+        help=(
+            'Train Q(pixels+state, a_exec) with a_exec = a_base + residual_scale * residual '
+            '(or V@c for basis mode). Enables BoN scoring of base-policy action chunks. '
+            'Actor still outputs residual/coeffs and still conditions on a_base.'
+        ),
+    )
 
     train_args_dict = dict(
         actor_lr=1e-4,

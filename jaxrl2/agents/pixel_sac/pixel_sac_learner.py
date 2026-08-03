@@ -38,12 +38,22 @@ from jaxrl2.utils.target_update import soft_target_update
 class TrainState(train_state.TrainState):
     batch_stats: Any
 
-@functools.partial(jax.jit, static_argnames=('critic_reduction', 'color_jitter',  'aug_next', 'num_cameras'))
+@functools.partial(
+    jax.jit,
+    static_argnames=(
+        'critic_reduction', 'color_jitter', 'aug_next', 'num_cameras',
+        'q_base_action', 'use_basis',
+    ),
+)
 def _update_jit(
     rng: PRNGKey, actor: TrainState, critic: TrainState,
     target_critic_params: Params, temp: TrainState, batch: TrainState,
     discount: float, tau: float, target_entropy: float,
     critic_reduction: str, color_jitter: bool, aug_next: bool, num_cameras: int,
+    q_base_action: bool = False,
+    residual_scale: float = 1.0,
+    use_basis: bool = False,
+    basis_V: Optional[jnp.ndarray] = None,
 ) -> Tuple[PRNGKey, TrainState, TrainState, Params, TrainState, Dict[str,float]]:
     aug_pixels = batch['observations']['pixels']
     aug_next_pixels = batch['next_observations']['pixels']
@@ -79,11 +89,25 @@ def _update_jit(
     
     key, rng = jax.random.split(rng)
     target_critic = critic.replace(params=target_critic_params)
-    new_critic, critic_info = update_critic(key, actor, critic, target_critic, temp, batch, discount, critic_reduction=critic_reduction)
+    new_critic, critic_info = update_critic(
+        key, actor, critic, target_critic, temp, batch, discount,
+        critic_reduction=critic_reduction,
+        q_base_action=q_base_action,
+        residual_scale=residual_scale,
+        use_basis=use_basis,
+        basis_V=basis_V,
+    )
     new_target_critic_params = soft_target_update(new_critic.params, target_critic_params, tau)
     
     key, rng = jax.random.split(rng)
-    new_actor, actor_info = update_actor(key, actor, new_critic, temp, batch, critic_reduction=critic_reduction)
+    new_actor, actor_info = update_actor(
+        key, actor, new_critic, temp, batch,
+        critic_reduction=critic_reduction,
+        q_base_action=q_base_action,
+        residual_scale=residual_scale,
+        use_basis=use_basis,
+        basis_V=basis_V,
+    )
     new_temp, alpha_info = update_temperature(temp, actor_info['entropy'], target_entropy)
 
     return rng, new_actor, new_critic, new_target_critic_params, new_temp, {
@@ -125,14 +149,28 @@ class PixelSACLearner(Agent):
                  action_magnitude: float = 1.0,
                  num_cameras: int = 1,
                  zero_init_actor_mean: bool = False,
+                 q_base_action: bool = False,
+                 residual_scale: float = 1.0,
+                 use_basis: bool = False,
+                 basis_V: Optional[np.ndarray] = None,
+                 critic_observations: Optional[Union[jnp.ndarray, DatasetDict]] = None,
+                 critic_actions: Optional[jnp.ndarray] = None,
                  ):
         """
         An implementation of the version of Soft-Actor-Critic described in https://arxiv.org/abs/1812.05905
+
+        If q_base_action is True, the critic is trained on
+        Q(pixels+state, a_base + residual_scale * residual) for BoN scoring of
+        base-policy action chunks. The actor still outputs residual / coeffs.
         """
 
         self.aug_next=aug_next
         self.color_jitter = color_jitter
         self.num_cameras = num_cameras
+        self.q_base_action = bool(q_base_action)
+        self.residual_scale = float(residual_scale)
+        self.use_basis = bool(use_basis)
+        self._basis_V = None if basis_V is None else jnp.asarray(basis_V, dtype=jnp.float32)
 
         self.action_dim = np.prod(actions.shape[-2:])
         self.action_chunk_shape = actions.shape[-2:]
@@ -143,6 +181,11 @@ class PixelSACLearner(Agent):
 
         rng = jax.random.PRNGKey(seed)
         rng, actor_key, critic_key, temp_key = jax.random.split(rng, 4)
+
+        if critic_observations is None:
+            critic_observations = observations
+        if critic_actions is None:
+            critic_actions = actions
 
         if encoder_type == 'small':
             encoder_def = Encoder(cnn_features, cnn_strides, cnn_padding)
@@ -207,7 +250,14 @@ class PixelSACLearner(Agent):
                                       use_bottleneck=use_bottleneck
                                       )
         print(critic_def)
-        critic_def_init = critic_def.init(critic_key, observations, actions)
+        if self.q_base_action:
+            print(
+                'q_base_action: critic sees pixels(+state) and '
+                f'executed chunk shape {critic_actions.shape}; '
+                f'actor residual dim={self.action_dim}, residual_scale={self.residual_scale}, '
+                f'use_basis={self.use_basis}'
+            )
+        critic_def_init = critic_def.init(critic_key, critic_observations, critic_actions)
         self._critic_init_params = critic_def_init['params']
 
         critic_params = critic_def_init['params']
@@ -239,9 +289,40 @@ class PixelSACLearner(Agent):
         print(f'target_entropy: {self.target_entropy}')
         print(self.critic_reduction)
 
+    def set_basis_matrix(self, basis_V: np.ndarray):
+        """Set / update the residual basis used to map coeffs -> executed chunks."""
+        self.use_basis = True
+        self._basis_V = jnp.asarray(basis_V, dtype=jnp.float32)
+        print(f'Set critic/actor residual basis V with shape {self._basis_V.shape}')
+
+    def q_values(self, observations, executed_actions) -> np.ndarray:
+        """Score executed action chunks for BoN: Q(pixels+state, a_exec)."""
+        from jaxrl2.agents.pixel_sac.executed_action_q import strip_action_diffusion
+
+        if isinstance(observations, dict) and 'action_diffusion' in observations:
+            observations = strip_action_diffusion(freeze(observations))
+        qs = self._critic.apply_fn(
+            {'params': self._critic.params}, observations, executed_actions
+        )
+        if self.critic_reduction == 'min':
+            q = qs.min(axis=0)
+        else:
+            q = qs.mean(axis=0)
+        return np.asarray(q)
+
     def update(self, batch: FrozenDict) -> Dict[str, float]:
+        if self.q_base_action and self.use_basis and self._basis_V is None:
+            raise RuntimeError(
+                'q_base_action with a projected basis requires set_basis_matrix() '
+                'before SAC updates'
+            )
+        # Avoid tracing None when the basis path is unused.
+        basis_V = self._basis_V if (self.q_base_action and self.use_basis) else jnp.zeros((1, 1))
         new_rng, new_actor, new_critic, new_target_critic, new_temp, info = _update_jit(
-            self._rng, self._actor, self._critic, self._target_critic_params, self._temp, batch, self.discount, self.tau, self.target_entropy, self.critic_reduction, self.color_jitter, self.aug_next, self.num_cameras
+            self._rng, self._actor, self._critic, self._target_critic_params, self._temp, batch,
+            self.discount, self.tau, self.target_entropy, self.critic_reduction,
+            self.color_jitter, self.aug_next, self.num_cameras,
+            self.q_base_action, self.residual_scale, self.use_basis, basis_V,
             )
 
         self._rng = new_rng

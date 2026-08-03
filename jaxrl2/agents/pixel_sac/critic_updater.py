@@ -1,9 +1,10 @@
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
 from flax.training.train_state import TrainState
 
+from jaxrl2.agents.pixel_sac.executed_action_q import residual_to_executed, strip_action_diffusion
 from jaxrl2.data.dataset import DatasetDict
 from jaxrl2.types import Params, PRNGKey
 
@@ -12,11 +13,39 @@ def update_critic(
         key: PRNGKey, actor: TrainState, critic: TrainState,
         target_critic: TrainState, temp: TrainState, batch: DatasetDict,
         discount: float, backup_entropy: bool = False,
-        critic_reduction: str = 'min') -> Tuple[TrainState, Dict[str, float]]:
+        critic_reduction: str = 'min',
+        q_base_action: bool = False,
+        residual_scale: float = 1.0,
+        use_basis: bool = False,
+        basis_V: Optional[jnp.ndarray] = None,
+) -> Tuple[TrainState, Dict[str, float]]:
     dist = actor.apply_fn({'params': actor.params}, batch['next_observations'])
     next_actions, next_log_probs = dist.sample_and_log_prob(seed=key)
+
+    if q_base_action:
+        critic_obs = strip_action_diffusion(batch['observations'])
+        critic_next_obs = strip_action_diffusion(batch['next_observations'])
+        actions = residual_to_executed(
+            batch['actions'],
+            batch['observations']['action_diffusion'],
+            residual_scale,
+            use_basis,
+            basis_V,
+        )
+        next_actions = residual_to_executed(
+            next_actions,
+            batch['next_observations']['action_diffusion'],
+            residual_scale,
+            use_basis,
+            basis_V,
+        )
+    else:
+        critic_obs = batch['observations']
+        critic_next_obs = batch['next_observations']
+        actions = batch['actions']
+
     next_qs = target_critic.apply_fn({'params': target_critic.params},
-                                     batch['next_observations'], next_actions)
+                                     critic_next_obs, next_actions)
     if critic_reduction == 'min':
         next_q = next_qs.min(axis=0)
     elif critic_reduction == 'mean':
@@ -32,8 +61,7 @@ def update_critic(
 
     def critic_loss_fn(
             critic_params: Params) -> Tuple[jnp.ndarray, Dict[str, float]]:
-        qs = critic.apply_fn({'params': critic_params}, batch['observations'],
-                             batch['actions'])
+        qs = critic.apply_fn({'params': critic_params}, critic_obs, actions)
         critic_loss = ((qs - target_q)**2).mean()
         return critic_loss, {
             'critic_loss': critic_loss,

@@ -220,6 +220,8 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
                 basis = fit_basis_from_warmup_chunks(variant, warmup_chunks)
                 variant.basis = basis
                 log_basis_explained_variance(wandb_logger, basis, step=i)
+                if getattr(variant, 'q_base_action', False) and hasattr(agent, 'set_basis_matrix'):
+                    agent.set_basis_matrix(basis.V)
             
             if variant.get("num_online_gradsteps_batch", -1) > 0:
                 num_gradsteps = variant.num_online_gradsteps_batch
