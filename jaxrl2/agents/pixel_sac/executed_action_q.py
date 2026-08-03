@@ -5,14 +5,16 @@ from __future__ import annotations
 from typing import Optional
 
 import jax.numpy as jnp
-from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
+from flax.core.frozen_dict import FrozenDict, freeze
 
 
 def strip_action_diffusion(observations: FrozenDict) -> FrozenDict:
     """Critic obs for BoN: pixels (+ state), without the base chunk."""
-    obs = unfreeze(observations)
-    obs.pop("action_diffusion", None)
-    return freeze(obs)
+    # Build explicitly (do not rely on pop) so the pytree keys are unambiguous.
+    keep = {'pixels': observations['pixels']}
+    if 'state' in observations:
+        keep['state'] = observations['state']
+    return freeze(keep)
 
 
 def residual_to_executed(

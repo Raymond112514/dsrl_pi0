@@ -364,7 +364,26 @@ class PixelSACLearner(Agent):
                     if 'pixels' not in k:
                         next_obs_dict[k] = v[t][None]
 
-                q_value = get_value(action, obs_dict, self._critic)
+                if self.q_base_action:
+                    from jaxrl2.agents.pixel_sac.executed_action_q import (
+                        residual_to_executed,
+                        strip_action_diffusion,
+                    )
+                    obs_fd = freeze(obs_dict)
+                    action_exec = residual_to_executed(
+                        jnp.asarray(action),
+                        jnp.asarray(obs_dict['action_diffusion']),
+                        self.residual_scale,
+                        self.use_basis,
+                        self._basis_V,
+                    )
+                    q_value = get_value(
+                        action_exec,
+                        strip_action_diffusion(obs_fd),
+                        self._critic,
+                    )
+                else:
+                    q_value = get_value(action, obs_dict, self._critic)
                 q_pred.append(q_value)
 
             if shaped_rewards is not None:
