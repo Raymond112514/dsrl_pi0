@@ -141,13 +141,15 @@ def compute_action_chunk(
 
 
 def log_basis_explained_variance(wandb_logger, basis, step=0):
+    btype = getattr(basis, 'basis_type', 'pca')
+    type_code = {'pca': 0, 'random': 1, 'vae': 2, 'vae_linear': 3}.get(btype, -1)
     metrics = {
         'basis/num_components': basis.num_basis,
-        'basis/type': 0 if getattr(basis, 'basis_type', 'pca') == 'pca' else 1,
+        'basis/type': type_code,
     }
-    if basis.explained_variance_ratio is None:
+    if getattr(basis, 'explained_variance_ratio', None) is None:
         wandb_logger.log(metrics, step=step)
-        print_green(f'Basis type={getattr(basis, "basis_type", "pca")} K={basis.num_basis} D={basis.feature_dim}')
+        print_green(f'Basis type={btype} K={basis.num_basis} D={basis.feature_dim}')
         return
     explained = np.asarray(basis.explained_variance_ratio, dtype=np.float64)
     metrics['basis/total_explained_variance'] = float(explained.sum())
@@ -175,6 +177,43 @@ def fit_basis_from_warmup_chunks(variant, warmup_chunks):
         f"{variant.warmup_rollouts} warmup trajectories"
     )
     return basis
+
+
+def fit_vae_from_warmup_chunks(variant, warmup_chunks):
+    from examples.residual_vae import ResidualActionVAE
+
+    action_dim = 7 if variant.env == 'libero' else 14
+    basis = ResidualActionVAE.fit(
+        np.stack(warmup_chunks, axis=0),
+        latent_dim=int(variant.num_basis),
+        query_freq=int(variant.query_freq),
+        action_dim=action_dim,
+        hidden=int(getattr(variant, 'vae_hidden', 128)),
+        linear=bool(getattr(variant, 'vae_linear', False)),
+        epochs=int(getattr(variant, 'vae_epochs', 120)),
+        batch_size=int(getattr(variant, 'vae_batch_size', 256)),
+        lr=float(getattr(variant, 'vae_lr', 1e-3)),
+        beta=float(getattr(variant, 'vae_beta', 1e-3)),
+        seed=int(variant.seed),
+    )
+    save_path = os.path.join(variant.outputdir, "residual_vae.pt")
+    basis.save(save_path)
+    print_green(
+        f"Fitted VAE z={basis.latent_dim} ({basis.basis_type}) on {len(warmup_chunks)} chunks "
+        f"from {variant.warmup_rollouts} warmup trajectories -> {save_path}"
+    )
+    return basis
+
+
+def _needs_warmup_basis_fit(variant) -> bool:
+    """Online PCA / VAE fit from warmup base chunks (no preloaded basis)."""
+    if getattr(variant, 'basis', None) is not None:
+        return False
+    if getattr(variant, 'use_vae_basis', False):
+        return not bool(getattr(variant, 'vae_path', '') or getattr(variant, 'basis_path', ''))
+    if getattr(variant, 'use_eigenbasis', False):
+        return not bool(getattr(variant, 'basis_path', ''))
+    return False
 
 def should_use_residual(variant, i):
     if getattr(variant, 'collect_with_residual', False) or (
@@ -205,22 +244,25 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
             num_traj += 1
             traj_id = online_replay_buffer._traj_counter
             add_online_data_to_buffer(variant, traj, online_replay_buffer)
-            if basis is None and getattr(variant, 'use_eigenbasis', False):
+            if basis is None and _needs_warmup_basis_fit(variant):
                 warmup_chunks.extend(traj.get('pi0_chunks', []))
             total_env_steps += traj['env_steps']
             print('online buffer timesteps length:', len(online_replay_buffer))
             print('online buffer num traj:', traj_id + 1)
             print('total env steps:', total_env_steps)
 
-            if (
-                basis is None
-                and getattr(variant, 'use_eigenbasis', False)
-                and num_traj >= warmup_rollouts
-            ):
-                basis = fit_basis_from_warmup_chunks(variant, warmup_chunks)
+            if basis is None and _needs_warmup_basis_fit(variant) and num_traj >= warmup_rollouts:
+                if getattr(variant, 'use_vae_basis', False):
+                    basis = fit_vae_from_warmup_chunks(variant, warmup_chunks)
+                else:
+                    basis = fit_basis_from_warmup_chunks(variant, warmup_chunks)
                 variant.basis = basis
                 log_basis_explained_variance(wandb_logger, basis, step=i)
-                if getattr(variant, 'q_base_action', False) and hasattr(agent, 'set_basis_matrix'):
+                if (
+                    getattr(variant, 'q_base_action', False)
+                    and hasattr(agent, 'set_basis_matrix')
+                    and getattr(basis, 'V', None) is not None
+                ):
                     agent.set_basis_matrix(basis.V)
             
             if variant.get("num_online_gradsteps_batch", -1) > 0:
@@ -355,7 +397,7 @@ def collect_traj(variant, agent, env, i, agent_dp=None, basis=None):
             )
             action_list.append(stored_action)
             obs_list.append(obs_dict)
-            if basis is None and getattr(variant, 'use_eigenbasis', False):
+            if basis is None and _needs_warmup_basis_fit(variant):
                 pi0_chunks.append(obs_dict['action_diffusion'].reshape(-1).astype(np.float64))
      
         action_t = actions[t % query_frequency]

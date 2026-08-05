@@ -15,8 +15,12 @@ if str(_REPO_ROOT) not in sys.path:
 
 
 def uses_projected_basis(variant) -> bool:
-    """True when SAC acts in K-dim coefficient space (PCA or random orthonormal)."""
-    return bool(getattr(variant, "use_eigenbasis", False) or getattr(variant, "use_random_basis", False))
+    """True when SAC acts in K-dim coefficient / VAE-latent residual space."""
+    return bool(
+        getattr(variant, "use_eigenbasis", False)
+        or getattr(variant, "use_random_basis", False)
+        or getattr(variant, "use_vae_basis", False)
+    )
 
 
 @dataclass

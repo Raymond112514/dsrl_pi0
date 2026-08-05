@@ -101,7 +101,10 @@ def build_exp_name(variant):
         parts = [f"task{variant.task_id}"]
     else:
         parts = [variant.env]
-    if uses_projected_basis(variant):
+    if getattr(variant, 'use_vae_basis', False):
+        tag = "vae_lin" if getattr(variant, 'vae_linear', False) else "vae"
+        parts.append(f"K{variant.num_basis}_{tag}")
+    elif uses_projected_basis(variant):
         tag = "rand" if getattr(variant, 'use_random_basis', False) else "pca"
         parts.append(f"K{variant.num_basis}_{tag}")
     if getattr(variant, 'q_base_action', False):
@@ -110,13 +113,52 @@ def build_exp_name(variant):
 
 
 def maybe_init_basis(variant):
-    """Load PCA basis, or create a random orthonormal basis for the ablation."""
-    if getattr(variant, 'use_eigenbasis', False) and getattr(variant, 'use_random_basis', False):
-        raise ValueError("Pass only one of --use_eigenbasis / --use_random_basis")
+    """Load PCA / random / VAE basis, or None to fit online from warmup."""
+    modes = [
+        bool(getattr(variant, 'use_eigenbasis', False)),
+        bool(getattr(variant, 'use_random_basis', False)),
+        bool(getattr(variant, 'use_vae_basis', False)),
+    ]
+    if sum(modes) > 1:
+        raise ValueError("Pass only one of --use_eigenbasis / --use_random_basis / --use_vae_basis")
+
+    if getattr(variant, 'use_vae_basis', False):
+        if getattr(variant, 'q_base_action', False):
+            raise ValueError(
+                "--q_base_action is not supported with --use_vae_basis "
+                "(nonlinear decode is only applied at env step time)."
+            )
+        # Keep DummyEnv / SAC dims consistent with PCA path.
+        if not hasattr(variant, 'num_basis') or variant.num_basis is None:
+            variant.num_basis = int(getattr(variant, 'vae_latent_dim', 8))
+        else:
+            # Prefer explicit vae_latent_dim when provided.
+            if getattr(variant, 'vae_latent_dim', None):
+                variant.num_basis = int(variant.vae_latent_dim)
+        vae_path = getattr(variant, 'vae_path', '') or getattr(variant, 'basis_path', '')
+        if vae_path and os.path.isfile(vae_path):
+            from examples.residual_vae import ResidualActionVAE
+            print(f"Loading residual VAE from {vae_path}")
+            basis = ResidualActionVAE.load(vae_path)
+            if (
+                basis.query_freq != int(variant.query_freq)
+                or basis.action_dim != int(variant.env_action_dim)
+            ):
+                raise ValueError(
+                    f"VAE shape is ({basis.query_freq}, {basis.action_dim}); expected "
+                    f"({variant.query_freq}, {variant.env_action_dim})"
+                )
+            if basis.latent_dim != int(variant.num_basis):
+                raise ValueError(
+                    f"Loaded VAE latent_dim={basis.latent_dim} but --num_basis/--vae_latent_dim="
+                    f"{variant.num_basis}"
+                )
+            return basis
+        return None
 
     if getattr(variant, 'use_random_basis', False):
         if variant.get('basis_path', ''):
-            raise ValueError("--basis_path is only supported with --use_eigenbasis")
+            raise ValueError("--basis_path is only supported with --use_eigenbasis / --use_vae_basis")
         action_dim = int(variant.env_action_dim)
         # Prefer query_freq so residual reshape matches collect; falls back to horizon.
         query_freq = int(variant.query_freq if variant.query_freq > 0 else variant.pi0_action_horizon)
@@ -280,6 +322,13 @@ def main(variant):
     if agent_dp is None:
         agent_dp = policy_config.create_trained_policy(config, checkpoint_dir)
     print("Loaded base policy from %s", checkpoint_dir)
+
+    if getattr(variant, 'use_vae_basis', False):
+        # SAC action dim must be known before DummyEnv construction.
+        if getattr(variant, 'vae_latent_dim', None):
+            variant.num_basis = int(variant.vae_latent_dim)
+        elif not getattr(variant, 'num_basis', None):
+            variant.num_basis = 8
 
     group_name = variant.prefix + '_' + variant.launch_group_id
     wandb_output_dir = tempfile.mkdtemp()
