@@ -205,6 +205,65 @@ def fit_vae_from_warmup_chunks(variant, warmup_chunks):
     return basis
 
 
+def log_vae_sample_videos_to_wandb(
+    variant,
+    env,
+    basis,
+    wandb_logger,
+    step: int = 0,
+    *,
+    num_samples: int = 8,
+    num_repeats: int = 10,
+    fps: int = 10,
+):
+    """Sample absolute action chunks from the VAE prior and log open-loop videos to wandb.
+
+    Does not write videos to disk.
+    """
+    import wandb
+    from examples.residual_vae import ResidualActionVAE
+
+    if not isinstance(basis, ResidualActionVAE):
+        return
+    if not getattr(wandb_logger, "wandb_logging", False):
+        print_green("Skipping VAE sample videos (wandb logging disabled)")
+        return
+
+    chunks = basis.sample_action_chunks(num_samples, seed=int(variant.seed) + 123)
+    print_green(
+        f"Logging {num_samples} VAE prior samples × {num_repeats} open-loop repeats to wandb"
+    )
+    payload = {}
+    for idx in range(num_samples):
+        chunk = chunks[idx]
+        if "libero" in variant.env:
+            obs = env.reset()
+        else:
+            obs, _ = env.reset()
+        frames = []
+        done = False
+        for _ in range(num_repeats):
+            for t in range(chunk.shape[0]):
+                frames.append(obs_to_img(obs, variant))
+                if "libero" in variant.env:
+                    obs, _reward, done, _ = env.step(chunk[t])
+                else:
+                    obs, _reward, terminated, truncated, _ = env.step(chunk[t])
+                    done = terminated or truncated
+                if done:
+                    break
+            if done:
+                break
+        if not frames:
+            continue
+        # wandb.Video expects (T, C, H, W) uint8
+        video = np.stack(frames, axis=0).transpose(0, 3, 1, 2).astype(np.uint8)
+        payload[f"vae_samples/sample_{idx:02d}"] = wandb.Video(video, fps=fps, format="mp4")
+    if payload:
+        wandb_logger.log(payload, step=step)
+        print_green(f"Logged {len(payload)} VAE sample videos to wandb")
+
+
 def _needs_warmup_basis_fit(variant) -> bool:
     """Online PCA / VAE fit from warmup base chunks (no preloaded basis)."""
     if getattr(variant, 'basis', None) is not None:
@@ -237,7 +296,10 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
     wandb_logger.log({'num_online_samples': 0}, step=i)
     wandb_logger.log({'num_online_trajs': 0}, step=i)
     wandb_logger.log({'env_steps': 0}, step=i)
-    
+    if basis is not None and getattr(variant, 'use_vae_basis', False):
+        # Pre-loaded VAE: log prior samples once at start.
+        log_vae_sample_videos_to_wandb(variant, eval_env, basis, wandb_logger, step=0)
+
     with tqdm(total=variant.max_steps, initial=0) as pbar:
         while i <= variant.max_steps:
             traj = collect_traj(variant, agent, env, i, agent_dp, basis=basis)
@@ -254,6 +316,9 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
             if basis is None and _needs_warmup_basis_fit(variant) and num_traj >= warmup_rollouts:
                 if getattr(variant, 'use_vae_basis', False):
                     basis = fit_vae_from_warmup_chunks(variant, warmup_chunks)
+                    log_vae_sample_videos_to_wandb(
+                        variant, eval_env, basis, wandb_logger, step=i
+                    )
                 else:
                     basis = fit_basis_from_warmup_chunks(variant, warmup_chunks)
                 variant.basis = basis

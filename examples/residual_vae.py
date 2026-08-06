@@ -113,6 +113,16 @@ class ResidualActionVAE:
         flat = flat * self.std
         return (float(scale) * flat).reshape(self.query_freq, self.action_dim).astype(np.float32)
 
+    def sample_action_chunks(self, n: int, seed: int = 0) -> np.ndarray:
+        """Draw n absolute action chunks from the prior z~N(0,I), decode + unnormalize."""
+        rng = np.random.default_rng(seed)
+        z = rng.standard_normal((n, self.latent_dim)).astype(np.float32)
+        model = self._ensure_model()
+        with torch.no_grad():
+            flat = model.decode(torch.from_numpy(z)).numpy()
+        chunks = flat * self.std[None, :] + self.mean[None, :]
+        return chunks.reshape(n, self.query_freq, self.action_dim).astype(np.float32)
+
     @classmethod
     def fit(
         cls,
