@@ -1,4 +1,4 @@
-"""Helpers for training Q(s, a_exec) with a_exec = a_base + scale * residual."""
+"""Helpers for Q(s, a_exec) and actor/critic action-space remapping."""
 
 from __future__ import annotations
 
@@ -46,3 +46,35 @@ def residual_to_executed(
         a_res = residual * residual_scale
     a_exec = a_base + a_res
     return a_exec.reshape(batch, 1, -1)
+
+
+def actor_action_to_critic_action(
+    actor_actions: jnp.ndarray,
+    basis_role: str,
+    basis_V: Optional[jnp.ndarray],
+) -> jnp.ndarray:
+    """Map actor/replay actions to the critic's action input (residual space).
+
+    Orthogonal to q_base_action (played a_exec). Does not add a_base.
+
+    Roles (V is D×K with orthonormal columns):
+      - both:   identity (c -> c, or r -> r)
+      - critic: lift c -> V @ c  (D-dim residual in the PCA span)
+      - actor:  project r -> V^T @ r = c  (coords of the in-subspace part)
+
+    Projection is necessary only for role=actor: unconstrained r may leave the
+    column span of V, so the K-dim critic must see c = V^T r.
+    """
+    batch = actor_actions.shape[0]
+    a = actor_actions.reshape(batch, -1)
+    if basis_role == 'both':
+        out = a
+    elif basis_role == 'critic':
+        # (B, K) @ (K, D) -> (B, D)
+        out = a @ basis_V.T
+    elif basis_role == 'actor':
+        # (B, D) @ (D, K) -> (B, K); least-squares coords since V^T V = I
+        out = a @ basis_V
+    else:
+        raise ValueError(f'Unknown basis_role={basis_role!r}')
+    return out.reshape(batch, 1, -1)

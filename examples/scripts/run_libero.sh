@@ -12,7 +12,7 @@ export EXP=./logs/$proj_name;
 export CUDA_VISIBLE_DEVICES=$device_id
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
-pip install mujoco==3.3.1
+pip install mujoco==3.2.3
 
 python3 examples/launch_train_sim.py \
 --algorithm pixel_sac \

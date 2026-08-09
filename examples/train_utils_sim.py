@@ -7,7 +7,7 @@ from openpi_client import image_tools
 import math
 import PIL
 
-from examples.residual_basis import uses_projected_basis
+from examples.residual_basis import actor_outputs_coeffs, needs_basis_V_in_updater, uses_projected_basis
 
 def print_green(text):
     print(f'\033[92m{text}\033[0m')
@@ -114,7 +114,7 @@ def compute_action_chunk(
     a_base = a_base_full[:query_freq]
     obs_dict = {**obs_dict, "action_diffusion": a_base.reshape(1, -1, 1)}
 
-    if uses_projected_basis(variant):
+    if actor_outputs_coeffs(variant):
         num_basis = variant.num_basis
         if use_residual and basis is not None:
             coeffs = agent.sample_actions(obs_dict)
@@ -142,7 +142,7 @@ def compute_action_chunk(
 
 def log_basis_explained_variance(wandb_logger, basis, step=0):
     btype = getattr(basis, 'basis_type', 'pca')
-    type_code = {'pca': 0, 'random': 1, 'vae': 2, 'vae_linear': 3}.get(btype, -1)
+    type_code = {'pca': 0, 'random': 1, 'vae': 2, 'vae_linear': 3, 'flow': 4}.get(btype, -1)
     metrics = {
         'basis/num_components': basis.num_basis,
         'basis/type': type_code,
@@ -205,7 +205,31 @@ def fit_vae_from_warmup_chunks(variant, warmup_chunks):
     return basis
 
 
-def log_vae_sample_videos_to_wandb(
+def fit_flow_from_warmup_chunks(variant, warmup_chunks):
+    from examples.residual_flow import ResidualActionFlow
+
+    action_dim = 7 if variant.env == 'libero' else 14
+    basis = ResidualActionFlow.fit(
+        np.stack(warmup_chunks, axis=0),
+        query_freq=int(variant.query_freq),
+        action_dim=action_dim,
+        hidden=int(getattr(variant, 'flow_hidden', 128)),
+        epochs=int(getattr(variant, 'flow_epochs', 120)),
+        batch_size=int(getattr(variant, 'flow_batch_size', 256)),
+        lr=float(getattr(variant, 'flow_lr', 1e-3)),
+        n_steps=int(getattr(variant, 'flow_n_steps', 10)),
+        seed=int(variant.seed),
+    )
+    save_path = os.path.join(variant.outputdir, "residual_flow.pt")
+    basis.save(save_path)
+    print_green(
+        f"Fitted flow D={basis.feature_dim} (n_steps={basis.n_steps}) on {len(warmup_chunks)} chunks "
+        f"from {variant.warmup_rollouts} warmup trajectories -> {save_path}"
+    )
+    return basis
+
+
+def log_generative_sample_videos_to_wandb(
     variant,
     env,
     basis,
@@ -215,23 +239,25 @@ def log_vae_sample_videos_to_wandb(
     num_samples: int = 8,
     num_repeats: int = 10,
     fps: int = 10,
+    log_prefix=None,
 ):
-    """Sample absolute action chunks from the VAE prior and log open-loop videos to wandb.
+    """Sample absolute action chunks from a generative basis and log open-loop videos to wandb.
 
-    Does not write videos to disk.
+    Does not write videos to disk. Works for VAE / flow (any basis with sample_action_chunks).
     """
     import wandb
-    from examples.residual_vae import ResidualActionVAE
 
-    if not isinstance(basis, ResidualActionVAE):
+    if not hasattr(basis, "sample_action_chunks"):
         return
     if not getattr(wandb_logger, "wandb_logging", False):
-        print_green("Skipping VAE sample videos (wandb logging disabled)")
+        print_green("Skipping generative sample videos (wandb logging disabled)")
         return
 
+    prefix = log_prefix or f"{getattr(basis, 'basis_type', 'gen')}_samples"
     chunks = basis.sample_action_chunks(num_samples, seed=int(variant.seed) + 123)
     print_green(
-        f"Logging {num_samples} VAE prior samples × {num_repeats} open-loop repeats to wandb"
+        f"Logging {num_samples} {getattr(basis, 'basis_type', 'gen')} prior samples "
+        f"× {num_repeats} open-loop repeats to wandb"
     )
     payload = {}
     for idx in range(num_samples):
@@ -258,16 +284,23 @@ def log_vae_sample_videos_to_wandb(
             continue
         # wandb.Video expects (T, C, H, W) uint8
         video = np.stack(frames, axis=0).transpose(0, 3, 1, 2).astype(np.uint8)
-        payload[f"vae_samples/sample_{idx:02d}"] = wandb.Video(video, fps=fps, format="mp4")
+        payload[f"{prefix}/sample_{idx:02d}"] = wandb.Video(video, fps=fps, format="mp4")
     if payload:
         wandb_logger.log(payload, step=step)
-        print_green(f"Logged {len(payload)} VAE sample videos to wandb")
+        print_green(f"Logged {len(payload)} generative sample videos to wandb")
+
+
+def log_vae_sample_videos_to_wandb(*args, **kwargs):
+    """Back-compat alias."""
+    return log_generative_sample_videos_to_wandb(*args, **kwargs)
 
 
 def _needs_warmup_basis_fit(variant) -> bool:
-    """Online PCA / VAE fit from warmup base chunks (no preloaded basis)."""
+    """Online PCA / VAE / flow fit from warmup base chunks (no preloaded basis)."""
     if getattr(variant, 'basis', None) is not None:
         return False
+    if getattr(variant, 'use_flow_basis', False):
+        return not bool(getattr(variant, 'flow_path', '') or getattr(variant, 'basis_path', ''))
     if getattr(variant, 'use_vae_basis', False):
         return not bool(getattr(variant, 'vae_path', '') or getattr(variant, 'basis_path', ''))
     if getattr(variant, 'use_eigenbasis', False):
@@ -296,9 +329,11 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
     wandb_logger.log({'num_online_samples': 0}, step=i)
     wandb_logger.log({'num_online_trajs': 0}, step=i)
     wandb_logger.log({'env_steps': 0}, step=i)
-    if basis is not None and getattr(variant, 'use_vae_basis', False):
-        # Pre-loaded VAE: log prior samples once at start.
-        log_vae_sample_videos_to_wandb(variant, eval_env, basis, wandb_logger, step=0)
+    if basis is not None and (
+        getattr(variant, 'use_vae_basis', False) or getattr(variant, 'use_flow_basis', False)
+    ):
+        # Pre-loaded generative model: log prior samples once at start.
+        log_generative_sample_videos_to_wandb(variant, eval_env, basis, wandb_logger, step=0)
 
     with tqdm(total=variant.max_steps, initial=0) as pbar:
         while i <= variant.max_steps:
@@ -316,7 +351,13 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
             if basis is None and _needs_warmup_basis_fit(variant) and num_traj >= warmup_rollouts:
                 if getattr(variant, 'use_vae_basis', False):
                     basis = fit_vae_from_warmup_chunks(variant, warmup_chunks)
-                    log_vae_sample_videos_to_wandb(
+                    log_generative_sample_videos_to_wandb(
+                        variant, eval_env, basis, wandb_logger, step=i
+                    )
+                elif getattr(variant, 'use_flow_basis', False):
+                    basis = fit_flow_from_warmup_chunks(variant, warmup_chunks)
+                    variant.num_basis = int(basis.num_basis)
+                    log_generative_sample_videos_to_wandb(
                         variant, eval_env, basis, wandb_logger, step=i
                     )
                 else:
@@ -324,7 +365,7 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
                 variant.basis = basis
                 log_basis_explained_variance(wandb_logger, basis, step=i)
                 if (
-                    getattr(variant, 'q_base_action', False)
+                    needs_basis_V_in_updater(variant)
                     and hasattr(agent, 'set_basis_matrix')
                     and getattr(basis, 'V', None) is not None
                 ):

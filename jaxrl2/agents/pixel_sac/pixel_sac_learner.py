@@ -42,7 +42,7 @@ class TrainState(train_state.TrainState):
     jax.jit,
     static_argnames=(
         'critic_reduction', 'color_jitter', 'aug_next', 'num_cameras',
-        'q_base_action', 'use_basis',
+        'q_base_action', 'use_basis', 'basis_role',
     ),
 )
 def _update_jit(
@@ -54,6 +54,7 @@ def _update_jit(
     residual_scale: float = 1.0,
     use_basis: bool = False,
     basis_V: Optional[jnp.ndarray] = None,
+    basis_role: str = 'both',
 ) -> Tuple[PRNGKey, TrainState, TrainState, Params, TrainState, Dict[str,float]]:
     aug_pixels = batch['observations']['pixels']
     aug_next_pixels = batch['next_observations']['pixels']
@@ -96,6 +97,7 @@ def _update_jit(
         residual_scale=residual_scale,
         use_basis=use_basis,
         basis_V=basis_V,
+        basis_role=basis_role,
     )
     new_target_critic_params = soft_target_update(new_critic.params, target_critic_params, tau)
     
@@ -107,6 +109,7 @@ def _update_jit(
         residual_scale=residual_scale,
         use_basis=use_basis,
         basis_V=basis_V,
+        basis_role=basis_role,
     )
     new_temp, alpha_info = update_temperature(temp, actor_info['entropy'], target_entropy)
 
@@ -153,6 +156,7 @@ class PixelSACLearner(Agent):
                  residual_scale: float = 1.0,
                  use_basis: bool = False,
                  basis_V: Optional[np.ndarray] = None,
+                 basis_role: str = 'both',
                  critic_observations: Optional[Union[jnp.ndarray, DatasetDict]] = None,
                  critic_actions: Optional[jnp.ndarray] = None,
                  ):
@@ -162,6 +166,11 @@ class PixelSACLearner(Agent):
         If q_base_action is True, the critic is trained on
         Q(pixels+state, a_base + residual_scale * residual) for BoN scoring of
         base-policy action chunks. The actor still outputs residual / coeffs.
+
+        basis_role (PCA/random only; orthogonal to q_base_action):
+          - both: actor and critic on the same representation
+          - critic: actor outputs c, critic sees residual V @ c
+          - actor: actor outputs r, critic sees projected coords V^T @ r
         """
 
         self.aug_next=aug_next
@@ -170,6 +179,7 @@ class PixelSACLearner(Agent):
         self.q_base_action = bool(q_base_action)
         self.residual_scale = float(residual_scale)
         self.use_basis = bool(use_basis)
+        self.basis_role = str(basis_role or 'both').lower()
         self._basis_V = None if basis_V is None else jnp.asarray(basis_V, dtype=jnp.float32)
 
         self.action_dim = np.prod(actions.shape[-2:])
@@ -257,6 +267,11 @@ class PixelSACLearner(Agent):
                 f'actor residual dim={self.action_dim}, residual_scale={self.residual_scale}, '
                 f'use_basis={self.use_basis}'
             )
+        if self.basis_role != 'both':
+            print(
+                f'basis_role={self.basis_role}: actor_dim={self.action_dim}, '
+                f'critic_action_shape={getattr(critic_actions, "shape", None)}'
+            )
         critic_def_init = critic_def.init(critic_key, critic_observations, critic_actions)
         self._critic_init_params = critic_def_init['params']
 
@@ -290,10 +305,14 @@ class PixelSACLearner(Agent):
         print(self.critic_reduction)
 
     def set_basis_matrix(self, basis_V: np.ndarray):
-        """Set / update the residual basis used to map coeffs -> executed chunks."""
-        self.use_basis = True
+        """Set / update V used for coeff<->residual remap and q_base_action lift."""
         self._basis_V = jnp.asarray(basis_V, dtype=jnp.float32)
         print(f'Set critic/actor residual basis V with shape {self._basis_V.shape}')
+
+    def _needs_basis_V(self) -> bool:
+        if self.basis_role in ('actor', 'critic'):
+            return True
+        return bool(self.q_base_action and self.use_basis)
 
     def q_values(self, observations, executed_actions) -> np.ndarray:
         """Score executed action chunks for BoN: Q(pixels+state, a_exec)."""
@@ -311,18 +330,19 @@ class PixelSACLearner(Agent):
         return np.asarray(q)
 
     def update(self, batch: FrozenDict) -> Dict[str, float]:
-        if self.q_base_action and self.use_basis and self._basis_V is None:
+        if self._needs_basis_V() and self._basis_V is None:
             raise RuntimeError(
-                'q_base_action with a projected basis requires set_basis_matrix() '
-                'before SAC updates'
+                'basis_role / q_base_action with a linear basis requires '
+                'set_basis_matrix() before SAC updates'
             )
         # Avoid tracing None when the basis path is unused.
-        basis_V = self._basis_V if (self.q_base_action and self.use_basis) else jnp.zeros((1, 1))
+        basis_V = self._basis_V if self._needs_basis_V() else jnp.zeros((1, 1))
         new_rng, new_actor, new_critic, new_target_critic, new_temp, info = _update_jit(
             self._rng, self._actor, self._critic, self._target_critic_params, self._temp, batch,
             self.discount, self.tau, self.target_entropy, self.critic_reduction,
             self.color_jitter, self.aug_next, self.num_cameras,
             self.q_base_action, self.residual_scale, self.use_basis, basis_V,
+            self.basis_role,
             )
 
         self._rng = new_rng
@@ -383,7 +403,13 @@ class PixelSACLearner(Agent):
                         self._critic,
                     )
                 else:
-                    q_value = get_value(action, obs_dict, self._critic)
+                    from jaxrl2.agents.pixel_sac.executed_action_q import (
+                        actor_action_to_critic_action,
+                    )
+                    critic_action = actor_action_to_critic_action(
+                        jnp.asarray(action), self.basis_role, self._basis_V,
+                    )
+                    q_value = get_value(critic_action, obs_dict, self._critic)
                 q_pred.append(q_value)
 
             if shaped_rewards is not None:

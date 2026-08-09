@@ -14,13 +14,62 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 
+VALID_BASIS_ROLES = ("both", "actor", "critic")
+
+
 def uses_projected_basis(variant) -> bool:
-    """True when SAC acts in K-dim coefficient / VAE-latent residual space."""
+    """True when SAC acts in projected residual space (PCA / random / VAE / flow).
+
+    For VAE/PCA/random this is K-dim; for flow matching it is full chunk dim D
+    (still routed through basis.coeffs_to_chunk).
+    """
     return bool(
         getattr(variant, "use_eigenbasis", False)
         or getattr(variant, "use_random_basis", False)
         or getattr(variant, "use_vae_basis", False)
+        or getattr(variant, "use_flow_basis", False)
     )
+
+
+def uses_linear_basis(variant) -> bool:
+    """PCA / random orthonormal bases (support --basis_role ablations)."""
+    return bool(
+        getattr(variant, "use_eigenbasis", False)
+        or getattr(variant, "use_random_basis", False)
+    )
+
+
+def get_basis_role(variant) -> str:
+    """Who uses the linear basis: both | actor | critic.
+
+    - both: actor and critic on coeffs c (default PCA path)
+    - critic: actor outputs c, critic trains on residual Vc
+    - actor: actor outputs full residual r, critic trains on c = V^T r
+    """
+    role = str(getattr(variant, "basis_role", "both") or "both").lower()
+    if role not in VALID_BASIS_ROLES:
+        raise ValueError(
+            f"--basis_role must be one of {VALID_BASIS_ROLES}, got {role!r}"
+        )
+    return role
+
+
+def actor_outputs_coeffs(variant) -> bool:
+    """True when the SAC actor / replay store K-dim coefficients (not full residual)."""
+    if getattr(variant, "use_vae_basis", False) or getattr(variant, "use_flow_basis", False):
+        return True
+    if uses_linear_basis(variant):
+        return get_basis_role(variant) in ("both", "critic")
+    return False
+
+
+def needs_basis_V_in_updater(variant) -> bool:
+    """True when Q updates need V (role remap and/or q_base_action lift)."""
+    if not uses_linear_basis(variant):
+        return False
+    if get_basis_role(variant) in ("actor", "critic"):
+        return True
+    return bool(getattr(variant, "q_base_action", False))
 
 
 @dataclass

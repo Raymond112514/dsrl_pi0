@@ -18,7 +18,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${REPO_ROOT}"
 export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/LIBERO:${REPO_ROOT}/openpi/src:${PYTHONPATH:-}"
 
-pip install mujoco==3.3.1
+pip install mujoco==3.2.3
 
 python3 examples/launch_train_sim_vae.py \
   --algorithm pixel_sac \

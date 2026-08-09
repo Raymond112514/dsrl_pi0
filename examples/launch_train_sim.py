@@ -82,6 +82,18 @@ if __name__ == '__main__':
             'Actor still outputs residual/coeffs and still conditions on a_base.'
         ),
     )
+    parser.add_argument(
+        '--basis_role',
+        default='both',
+        choices=['both', 'actor', 'critic'],
+        help=(
+            'PCA/random ablation of who uses the basis (requires --use_eigenbasis or '
+            '--use_random_basis). both: actor+critic on coeffs c; '
+            'critic: actor outputs c, Q trains on residual V@c; '
+            'actor: actor outputs full residual r, Q trains on projected c=V^T r. '
+            'Mutually exclusive with --q_base_action.'
+        ),
+    )
 
     train_args_dict = dict(
         actor_lr=1e-4,

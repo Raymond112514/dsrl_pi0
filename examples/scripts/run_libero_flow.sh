@@ -1,6 +1,9 @@
 #!/bin/bash
-proj_name=DSRL_pi0_Libero_basis
-device_id=3
+# Flow-matching residual RL on Libero (pi0.5).
+# a = a_base + λ * flow(w), w = π_residual(s, a_base) ∈ R^{query_freq * 7}
+# No --num_basis / latent dim.
+proj_name=DSRL_pi0_Libero_flow
+device_id="${DEVICE_ID:-3}"
 
 export DISPLAY=:0
 export MUJOCO_GL=egl
@@ -18,10 +21,10 @@ export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/LIBERO:${REPO_ROOT}/openpi/src:${PY
 
 pip install mujoco==3.2.3
 
-python3 examples/launch_train_sim.py \
+python3 examples/launch_train_sim_flow.py \
   --algorithm pixel_sac \
   --env libero \
-  --prefix dsrl_pi0_libero_basis \
+  --prefix dsrl_pi0_libero_flow \
   --wandb_project DSRL_pi0_Libero \
   --batch_size 256 \
   --discount 0.999 \
@@ -39,6 +42,6 @@ python3 examples/launch_train_sim.py \
   --hidden_dims 128 \
   --output_dir "${EXP}" \
   --task_id 44 \
-  --use_eigenbasis \
-  --num_basis 8 \
-  --warmup_rollouts 20
+  --warmup_rollouts 20 \
+  --flow_epochs 120 \
+  --flow_n_steps 10

@@ -4,7 +4,11 @@ import jax
 import jax.numpy as jnp
 from flax.training.train_state import TrainState
 
-from jaxrl2.agents.pixel_sac.executed_action_q import residual_to_executed, strip_action_diffusion
+from jaxrl2.agents.pixel_sac.executed_action_q import (
+    actor_action_to_critic_action,
+    residual_to_executed,
+    strip_action_diffusion,
+)
 from jaxrl2.data.dataset import DatasetDict
 from jaxrl2.types import Params, PRNGKey
 
@@ -15,6 +19,7 @@ def update_actor(key: PRNGKey, actor: TrainState, critic: TrainState,
                  residual_scale: float = 1.0,
                  use_basis: bool = False,
                  basis_V: Optional[jnp.ndarray] = None,
+                 basis_role: str = 'both',
 ) -> Tuple[TrainState, Dict[str, float]]:
     
     key, key_act = jax.random.split(key, num=2)
@@ -54,7 +59,9 @@ def update_actor(key: PRNGKey, actor: TrainState, critic: TrainState,
             )
         else:
             critic_obs = batch['observations']
-            critic_actions = actions
+            critic_actions = actor_action_to_critic_action(
+                actions, basis_role, basis_V,
+            )
 
         if hasattr(critic, 'batch_stats') and critic.batch_stats is not None:
             qs, _ = critic.apply_fn({'params': critic.params, 'batch_stats': critic.batch_stats}, critic_obs,

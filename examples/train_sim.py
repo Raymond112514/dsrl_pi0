@@ -37,7 +37,14 @@ from jax.experimental.compilation_cache import compilation_cache
 from openpi.training import config as openpi_config
 from openpi.policies import policy_config
 from openpi.shared import download
-from examples.residual_basis import ResidualActionBasis, uses_projected_basis
+from examples.residual_basis import (
+    ResidualActionBasis,
+    actor_outputs_coeffs,
+    get_basis_role,
+    needs_basis_V_in_updater,
+    uses_linear_basis,
+    uses_projected_basis,
+)
 home_dir = os.environ['HOME']
 compilation_cache.initialize_cache(os.path.join(home_dir, 'jax_compilation_cache'))
 
@@ -86,7 +93,8 @@ class DummyEnv(gym.ObservationWrapper):
             obs_dict['action_diffusion'] = Box(
                 low=-np.inf, high=np.inf, shape=(residual_dim, 1), dtype=np.float32
             )
-            if uses_projected_basis(variant):
+            # Replay / actor dim: K coeffs unless basis_role=actor (full residual).
+            if actor_outputs_coeffs(variant):
                 sac_dim = variant.num_basis
             else:
                 sac_dim = residual_dim
@@ -104,23 +112,59 @@ def build_exp_name(variant):
     if getattr(variant, 'use_vae_basis', False):
         tag = "vae_lin" if getattr(variant, 'vae_linear', False) else "vae"
         parts.append(f"K{variant.num_basis}_{tag}")
+    elif getattr(variant, 'use_flow_basis', False):
+        parts.append(f"D{variant.num_basis}_flow")
     elif uses_projected_basis(variant):
         tag = "rand" if getattr(variant, 'use_random_basis', False) else "pca"
         parts.append(f"K{variant.num_basis}_{tag}")
+        if uses_linear_basis(variant):
+            role = get_basis_role(variant)
+            if role != "both":
+                parts.append(f"role_{role}")
     if getattr(variant, 'q_base_action', False):
         parts.append("qbase")
     return "_".join(parts)
 
 
 def maybe_init_basis(variant):
-    """Load PCA / random / VAE basis, or None to fit online from warmup."""
+    """Load PCA / random / VAE / flow basis, or None to fit online from warmup."""
     modes = [
         bool(getattr(variant, 'use_eigenbasis', False)),
         bool(getattr(variant, 'use_random_basis', False)),
         bool(getattr(variant, 'use_vae_basis', False)),
+        bool(getattr(variant, 'use_flow_basis', False)),
     ]
     if sum(modes) > 1:
-        raise ValueError("Pass only one of --use_eigenbasis / --use_random_basis / --use_vae_basis")
+        raise ValueError(
+            "Pass only one of --use_eigenbasis / --use_random_basis / "
+            "--use_vae_basis / --use_flow_basis"
+        )
+
+    if getattr(variant, 'use_flow_basis', False):
+        if getattr(variant, 'q_base_action', False):
+            raise ValueError(
+                "--q_base_action is not supported with --use_flow_basis "
+                "(flow integrate is only applied at env step time)."
+            )
+        # SAC dim = full residual chunk (no latent bottleneck).
+        variant.num_basis = int(variant.query_freq) * int(variant.env_action_dim)
+        flow_path = getattr(variant, 'flow_path', '') or getattr(variant, 'basis_path', '')
+        if flow_path and os.path.isfile(flow_path):
+            from examples.residual_flow import ResidualActionFlow
+            print(f"Loading residual flow from {flow_path}")
+            basis = ResidualActionFlow.load(flow_path)
+            if (
+                basis.query_freq != int(variant.query_freq)
+                or basis.action_dim != int(variant.env_action_dim)
+            ):
+                raise ValueError(
+                    f"Flow shape is ({basis.query_freq}, {basis.action_dim}); expected "
+                    f"({variant.query_freq}, {variant.env_action_dim})"
+                )
+            if getattr(variant, 'flow_n_steps', None):
+                basis.n_steps = int(variant.flow_n_steps)
+            return basis
+        return None
 
     if getattr(variant, 'use_vae_basis', False):
         if getattr(variant, 'q_base_action', False):
@@ -158,7 +202,10 @@ def maybe_init_basis(variant):
 
     if getattr(variant, 'use_random_basis', False):
         if variant.get('basis_path', ''):
-            raise ValueError("--basis_path is only supported with --use_eigenbasis / --use_vae_basis")
+            raise ValueError(
+                "--basis_path is only supported with --use_eigenbasis / "
+                "--use_vae_basis / --use_flow_basis"
+            )
         action_dim = int(variant.env_action_dim)
         # Prefer query_freq so residual reshape matches collect; falls back to horizon.
         query_freq = int(variant.query_freq if variant.query_freq > 0 else variant.pi0_action_horizon)
@@ -229,19 +276,8 @@ def main(variant):
         import uuid
         variant.prefix = str(uuid.uuid4().fields[-1])[:5]
 
-    # if variant.suffix:
-    #     expname = create_exp_name(variant.prefix, seed=variant.seed) + f"_{variant.suffix}"
-    # else:
-    #     expname = create_exp_name(variant.prefix, seed=variant.seed)
-    
-    expname = build_exp_name(variant)
-
-    output_root = variant.output_dir
-    outputdir = os.path.join(output_root, f"{expname}_{time.strftime('%Y%m%d-%H%M%S')}_{variant.seed}")
-    variant.outputdir = outputdir
-    os.makedirs(outputdir, exist_ok=True)
-    print('writing to output dir ', outputdir)
-    
+    # Exp name / outputdir are created after query_freq, env_action_dim, and
+    # num_basis are known (flow sets num_basis = query_freq * action_dim).
     if variant.env == 'libero':
         benchmark_dict = benchmark.get_benchmark_dict()
         task_suite = benchmark_dict["libero_90"]()
@@ -329,6 +365,18 @@ def main(variant):
             variant.num_basis = int(variant.vae_latent_dim)
         elif not getattr(variant, 'num_basis', None):
             variant.num_basis = 8
+    elif getattr(variant, 'use_flow_basis', False):
+        # Full chunk dim; no separate --num_basis.
+        variant.num_basis = int(variant.query_freq) * int(variant.env_action_dim)
+
+    expname = build_exp_name(variant)
+    output_root = variant.output_dir
+    outputdir = os.path.join(
+        output_root, f"{expname}_{time.strftime('%Y%m%d-%H%M%S')}_{variant.seed}"
+    )
+    variant.outputdir = outputdir
+    os.makedirs(outputdir, exist_ok=True)
+    print('writing to output dir ', outputdir)
 
     group_name = variant.prefix + '_' + variant.launch_group_id
     wandb_output_dir = tempfile.mkdtemp()
@@ -344,10 +392,28 @@ def main(variant):
     if variant.basis is not None:
         log_basis_explained_variance(wandb_logger, variant.basis, step=0)
 
+    basis_role = 'both'
+    if uses_linear_basis(variant):
+        basis_role = get_basis_role(variant)
+    elif str(getattr(variant, 'basis_role', 'both') or 'both').lower() != 'both':
+        raise ValueError(
+            '--basis_role is only supported with --use_eigenbasis / --use_random_basis'
+        )
+
     q_base_action = bool(getattr(variant, 'q_base_action', False))
+    if q_base_action and basis_role != 'both':
+        raise ValueError(
+            '--q_base_action and --basis_role={actor,critic} are mutually exclusive '
+            '(q_base_action trains Q on played a_exec; basis_role remaps residual form)'
+        )
+
     critic_observations = sample_obs
     critic_actions = sample_action
     basis_V = None
+    if variant.basis is not None and getattr(variant.basis, 'V', None) is not None:
+        if needs_basis_V_in_updater(variant):
+            basis_V = variant.basis.V
+
     if q_base_action:
         if 'action_diffusion' not in sample_obs:
             raise ValueError('--q_base_action requires residual RL envs with action_diffusion')
@@ -357,12 +423,29 @@ def main(variant):
         critic_actions = add_batch_dim(
             np.zeros((1, exec_dim), dtype=np.float32)
         )
-        if variant.basis is not None:
-            basis_V = variant.basis.V
         print(
             'q_base_action enabled: '
             f'critic_obs={list(critic_observations.keys())}, '
             f'critic_action_dim={exec_dim}'
+        )
+    elif basis_role == 'critic':
+        # Actor stores c; critic trains on residual V @ c in R^D.
+        residual_dim = int(variant.query_freq) * int(variant.env_action_dim)
+        critic_actions = add_batch_dim(
+            np.zeros((1, residual_dim), dtype=np.float32)
+        )
+        print(
+            f'basis_role=critic: actor_dim={sample_action.shape[-1]}, '
+            f'critic_action_dim={residual_dim} (V @ c)'
+        )
+    elif basis_role == 'actor':
+        # Actor stores r in R^D; critic trains on projected coords c = V^T r.
+        critic_actions = add_batch_dim(
+            np.zeros((1, int(variant.num_basis)), dtype=np.float32)
+        )
+        print(
+            f'basis_role=actor: actor_dim={sample_action.shape[-1]}, '
+            f'critic_action_dim={variant.num_basis} (V^T @ r)'
         )
 
     agent = PixelSACLearner(
@@ -375,12 +458,15 @@ def main(variant):
         ),
         q_base_action=q_base_action,
         residual_scale=float(getattr(variant, 'residual_scale', 1.0)),
-        use_basis=uses_projected_basis(variant),
+        use_basis=uses_projected_basis(variant) and actor_outputs_coeffs(variant),
         basis_V=basis_V,
+        basis_role=basis_role,
         critic_observations=critic_observations,
         critic_actions=critic_actions,
         **kwargs,
     )
+    if basis_V is not None:
+        agent.set_basis_matrix(basis_V)
 
     online_buffer_size = variant.max_steps  // variant.multi_grad_step
     online_replay_buffer = ReplayBuffer(dummy_env.observation_space, dummy_env.action_space, int(online_buffer_size))

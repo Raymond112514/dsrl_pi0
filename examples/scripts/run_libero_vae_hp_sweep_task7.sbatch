@@ -41,6 +41,9 @@ cd ~/dsrl_pi0
 REPO_ROOT="$(pwd)"
 export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/LIBERO:${REPO_ROOT}/openpi/src:${PYTHONPATH:-}"
 
+# Match openpi/examples/libero (3.3.x can make Franka colors look wrong).
+pip install -q mujoco==3.2.3
+
 mkdir -p logs
 
 # --------------------------
