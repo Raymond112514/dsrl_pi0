@@ -252,6 +252,10 @@ class PixelSACLearner(Agent):
                                   params=actor_params,
                                   tx=optax.adam(learning_rate=actor_lr),
                                   batch_stats=actor_batch_stats)
+        actor_param_count = int(sum(
+            x.size for x in jax.tree_util.tree_leaves(actor_params)
+        ))
+        print(f'actor parameter count: {actor_param_count}')
 
         critic_def = StateActionEnsemble(hidden_dims, num_qs=num_qs)
         critic_def = PixelMultiplexer(encoder=encoder_def,

@@ -48,10 +48,20 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
 
                     pbar.update()
                     i += 1
-                    
+
+                    # SAC actor grad diagnostics: log every gradient step.
+                    update_info = {k: jax.device_get(v) for k, v in update_info.items()}
+                    sac_actor_stats = {
+                        k: v for k, v in update_info.items()
+                        if k.startswith('sac_actor_stats/') and getattr(v, 'ndim', 1) == 0
+                    }
+                    if sac_actor_stats:
+                        wandb_logger.log(sac_actor_stats, step=i)
+
                     if i % variant.log_interval == 0:
-                        update_info = {k: jax.device_get(v) for k, v in update_info.items()}
                         for k, v in update_info.items():
+                            if k.startswith('sac_actor_stats/'):
+                                continue
                             if v.ndim == 0:
                                 wandb_logger.log({f'training/{k}': v}, step=i)
                             elif v.ndim <= 2:
