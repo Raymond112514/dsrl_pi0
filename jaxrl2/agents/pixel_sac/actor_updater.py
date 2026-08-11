@@ -25,10 +25,13 @@ def update_actor(key: PRNGKey, actor: TrainState, critic: TrainState,
                  use_basis: bool = False,
                  basis_V: Optional[jnp.ndarray] = None,
                  basis_role: str = 'both',
+                 disable_entropy: bool = False,
 ) -> Tuple[TrainState, Dict[str, float]]:
     
     key, key_act = jax.random.split(key, num=2)
     alpha = temp.apply_fn({'params': temp.params})
+    # When entropy is disabled, drop α log π from the actor objective (DDPG-style).
+    entropy_coef = jnp.array(0.0 if disable_entropy else 1.0, dtype=jnp.float32)
 
     def apply_actor(actor_params: Params):
         if hasattr(actor, 'batch_stats') and actor.batch_stats is not None:
@@ -92,6 +95,7 @@ def update_actor(key: PRNGKey, actor: TrainState, critic: TrainState,
         actions, log_probs = dist.sample_and_log_prob(seed=key_act)
         critic_obs, critic_actions = actions_to_critic_inputs(actions)
         q = evaluate_q(critic_obs, critic_actions)
+        # Raw entropy term (always computed for logging / grad diagnostics).
         entropy_term = (alpha * log_probs).mean()
         critic_term = (-q).mean()
         return entropy_term, critic_term, log_probs, q
@@ -99,7 +103,7 @@ def update_actor(key: PRNGKey, actor: TrainState, critic: TrainState,
     def actor_loss_fn(actor_params: Params):
         dist, new_model_state = apply_actor(actor_params)
         entropy_term, critic_term, log_probs, q = terms_from_dist(dist)
-        actor_loss = entropy_term + critic_term
+        actor_loss = entropy_coef * entropy_term + critic_term
 
         mean_dist = dist.distribution._loc
         std_diag_dist = dist.distribution._scale_diag
@@ -107,6 +111,7 @@ def update_actor(key: PRNGKey, actor: TrainState, critic: TrainState,
             'actor_loss': actor_loss,
             'actor_entropy_loss': entropy_term,
             'actor_critic_loss': critic_term,
+            'disable_entropy': jnp.array(float(disable_entropy)),
             'entropy': -log_probs.mean(),
             'q_pi_in_actor': q.mean(),
             'mean_pi_norm': jnp.linalg.norm(mean_dist, axis=-1).mean(),

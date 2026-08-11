@@ -83,6 +83,14 @@ if __name__ == "__main__":
         type=str,
         help="Alias for --vae_path",
     )
+    parser.add_argument(
+        "--disable_entropy",
+        action="store_true",
+        help=(
+            "Disable the SAC entropy term in the actor objective (optimize -Q only) "
+            "and freeze temperature."
+        ),
+    )
 
     train_args_dict = dict(
         actor_lr=1e-4,

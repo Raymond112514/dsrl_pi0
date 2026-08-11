@@ -271,6 +271,7 @@ def main(variant):
     kwargs = variant['train_kwargs']
     if kwargs.pop('cosine_decay', False):
         kwargs['decay_steps'] = variant.max_steps
+    kwargs['disable_entropy'] = bool(getattr(variant, 'disable_entropy', False))
         
     if not variant.prefix:
         import uuid

@@ -26,6 +26,14 @@ if __name__ == '__main__':
     parser.add_argument('--resize_image', default=-1, help='the size of image if need resizing', type=int)
     parser.add_argument('--query_freq', default=-1, help='query frequency', type=int)
     parser.add_argument('--instruction', default='put the spoon on the plate', help='language instruction for the robot')
+    parser.add_argument(
+        '--disable_entropy',
+        action='store_true',
+        help=(
+            'Disable the SAC entropy term in the actor objective (optimize -Q only) '
+            'and freeze temperature.'
+        ),
+    )
     
     # The hyperparameters for the real robot experiments
     train_args_dict = dict(

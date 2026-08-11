@@ -42,7 +42,7 @@ class TrainState(train_state.TrainState):
     jax.jit,
     static_argnames=(
         'critic_reduction', 'color_jitter', 'aug_next', 'num_cameras',
-        'q_base_action', 'use_basis', 'basis_role',
+        'q_base_action', 'use_basis', 'basis_role', 'disable_entropy',
     ),
 )
 def _update_jit(
@@ -55,6 +55,7 @@ def _update_jit(
     use_basis: bool = False,
     basis_V: Optional[jnp.ndarray] = None,
     basis_role: str = 'both',
+    disable_entropy: bool = False,
 ) -> Tuple[PRNGKey, TrainState, TrainState, Params, TrainState, Dict[str,float]]:
     aug_pixels = batch['observations']['pixels']
     aug_next_pixels = batch['next_observations']['pixels']
@@ -110,8 +111,18 @@ def _update_jit(
         use_basis=use_basis,
         basis_V=basis_V,
         basis_role=basis_role,
+        disable_entropy=disable_entropy,
     )
-    new_temp, alpha_info = update_temperature(temp, actor_info['entropy'], target_entropy)
+    if disable_entropy:
+        new_temp = temp
+        alpha_info = {
+            'temperature': temp.apply_fn({'params': temp.params}),
+            'temperature_loss': jnp.zeros((), dtype=jnp.float32),
+        }
+    else:
+        new_temp, alpha_info = update_temperature(
+            temp, actor_info['entropy'], target_entropy
+        )
 
     return rng, new_actor, new_critic, new_target_critic_params, new_temp, {
         **critic_info,
@@ -157,6 +168,7 @@ class PixelSACLearner(Agent):
                  use_basis: bool = False,
                  basis_V: Optional[np.ndarray] = None,
                  basis_role: str = 'both',
+                 disable_entropy: bool = False,
                  critic_observations: Optional[Union[jnp.ndarray, DatasetDict]] = None,
                  critic_actions: Optional[jnp.ndarray] = None,
                  ):
@@ -171,6 +183,9 @@ class PixelSACLearner(Agent):
           - both: actor and critic on the same representation
           - critic: actor outputs c, critic sees residual V @ c
           - actor: actor outputs r, critic sees projected coords V^T @ r
+
+        If disable_entropy is True, the actor maximizes Q only (no α log π term)
+        and the temperature is not updated.
         """
 
         self.aug_next=aug_next
@@ -180,6 +195,7 @@ class PixelSACLearner(Agent):
         self.residual_scale = float(residual_scale)
         self.use_basis = bool(use_basis)
         self.basis_role = str(basis_role or 'both').lower()
+        self.disable_entropy = bool(disable_entropy)
         self._basis_V = None if basis_V is None else jnp.asarray(basis_V, dtype=jnp.float32)
 
         self.action_dim = np.prod(actions.shape[-2:])
@@ -306,6 +322,7 @@ class PixelSACLearner(Agent):
         else:
             self.target_entropy = float(target_entropy)
         print(f'target_entropy: {self.target_entropy}')
+        print(f'disable_entropy: {self.disable_entropy}')
         print(self.critic_reduction)
 
     def set_basis_matrix(self, basis_V: np.ndarray):
@@ -346,7 +363,7 @@ class PixelSACLearner(Agent):
             self.discount, self.tau, self.target_entropy, self.critic_reduction,
             self.color_jitter, self.aug_next, self.num_cameras,
             self.q_base_action, self.residual_scale, self.use_basis, basis_V,
-            self.basis_role,
+            self.basis_role, self.disable_entropy,
             )
 
         self._rng = new_rng
