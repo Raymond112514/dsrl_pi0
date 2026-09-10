@@ -12,9 +12,8 @@ sys.path.append('/global/home/users/r112358/dsrl_pi0/openpi')
 sys.path.append('/global/home/users/r112358/dsrl_pi0/openpi/src')
 sys.path.append('/global/home/users/r112358/dsrl_pi0/examples/classifier')
 
-from buffer import LabelBuffer
-from classifier import Classifier
-from gail import GailClassifier
+from data import Buffer
+from model import SVMClassifier
 import pathlib
 import time
 import jax
@@ -81,8 +80,8 @@ class DummyEnv(gym.ObservationWrapper):
         self.action_space = Box(low=-1, high=1, shape=(1, 32,), dtype=np.float32) # 32 is the noise action space of pi 0
 
 def build_exp_name(variant):
-    if variant.use_classifier:
-        exp_name = f"task{variant.task_id}_{variant.classifier_encoder_type}_rs{variant.reward_scale}_uf{variant.classifier_update_freq}_{variant.use_classifier}_{variant.shaping_type}"
+    if variant.use_svm_classifier:
+        exp_name = f"task{variant.task_id}_rs{variant.reward_scale}_uf{variant.svm_classifier_update_freq}_{variant.use_svm_classifier}_{variant.shaping_type}"
     else:
         exp_name = f"task{variant.task_id}"
     return exp_name
@@ -144,26 +143,22 @@ def main(variant):
     print('sample obs shapes', [(k, v.shape) for k, v in sample_obs.items()])
     print('sample action shape', sample_action.shape)
     
-    if variant.use_classifier:
-        if variant.shaping_type == "default":
-            classifier = Classifier(encoder_type=variant.classifier_encoder_type)
-            buffer = LabelBuffer()
-        elif variant.shaping_type == "gail":
-            classifier = GailClassifier(encoder_type=variant.classifier_encoder_type)
-            buffer = LabelBuffer()
+    if variant.use_svm_classifier:
+        svm_classifier = SVMClassifier()
+        buffer = Buffer()
     else:
-        classifier = buffer = None
+        svm_classifier = buffer = None
 
     config = openpi_config.get_config("pi0_libero")
     #checkpoint_dir = download.maybe_download("s3://openpi-assets/checkpoints/pi0_libero")
     checkpoint_dir = "/global/scratch/users/r112358/checkpoints/pi0_libero"
     agent_dp = policy_config.create_trained_policy(config, checkpoint_dir)
     print("Loaded pi0 policy from %s", checkpoint_dir)
-    agent = PixelSACLearner(variant.seed, sample_obs, sample_action, **kwargs, classifier=classifier)
+    agent = PixelSACLearner(variant.seed, sample_obs, sample_action, **kwargs, svm_classifier=svm_classifier)
 
     online_buffer_size = variant.max_steps  // variant.multi_grad_step
     online_replay_buffer = ReplayBuffer(dummy_env.observation_space, dummy_env.action_space, int(online_buffer_size))
     replay_buffer = online_replay_buffer
     replay_buffer.seed(variant.seed)
-    trajwise_alternating_training_loop(variant, agent, env, eval_env, online_replay_buffer, replay_buffer, wandb_logger, shard_fn=shard_fn, agent_dp=agent_dp, classifier=classifier, buffer=buffer)
+    trajwise_alternating_training_loop(variant, agent, env, eval_env, online_replay_buffer, replay_buffer, wandb_logger, shard_fn=shard_fn, agent_dp=agent_dp, svm_classifier=svm_classifier, buffer=buffer)
  

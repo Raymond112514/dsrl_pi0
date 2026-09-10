@@ -31,9 +31,8 @@ if __name__ == '__main__':
     parser.add_argument('--query_freq', default=-1, help='query frequency', type=int)
     parser.add_argument('--task_id', default=44, help='task id', type=int)
     
-    parser.add_argument('--use_classifier', default=False, help='whether to use classifier', type=bool)
-    parser.add_argument('--classifier_encoder_type', default='cnn', help='type of encoder', type=str)
-    parser.add_argument('--classifier_update_freq', default=10, help='frequency of classifier update', type=int)
+    parser.add_argument('--use_svm_classifier', default=False, help='whether to use svm classifier', type=bool)
+    parser.add_argument('--svm_classifier_update_freq', default=10, help='frequency of svm classifier update', type=int)
     parser.add_argument('--reward_scale', default=0.0, help='reward scale', type=float)
     parser.add_argument('--shaping_type', default="default", help="", type=str)
 

@@ -32,7 +32,6 @@ python3 examples/launch_train_sim.py \
 --action_magnitude 1.0 \
 --query_freq 20 \
 --hidden_dims 128 \
---use_classifier false \
---classifier_encoder_type resnet \
---classifier_update_freq 100 \
+--use_svm_classifier false \
+--svm_classifier_update_freq 100 \
 --reward_scale 0.0 \
