@@ -37,65 +37,43 @@ def obs_to_img(obs, variant):
     '''
     Convert raw observation to resized image for DSRL actor/critic
     '''
-    if variant.env == 'libero':
-        curr_image = obs["agentview_image"][::-1, ::-1]
-    elif variant.env == 'aloha_cube':
-        curr_image = obs["pixels"]["top"]
-    else:
-        raise NotImplementedError()
+    curr_image = obs["agentview_image"][::-1, ::-1]
     if variant.resize_image > 0: 
         curr_image = np.array(PIL.Image.fromarray(curr_image).resize((variant.resize_image, variant.resize_image)))
     return curr_image
 
 def obs_to_pi_zero_input(obs, variant):
-    if variant.env == 'libero':
-        img = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
-        wrist_img = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
-        img = image_tools.convert_to_uint8(
-            image_tools.resize_with_pad(img, 224, 224)
-        )
-        wrist_img = image_tools.convert_to_uint8(
-            image_tools.resize_with_pad(wrist_img, 224, 224)
-        )
-        
-        obs_pi_zero = {
-                        "observation/image": img,
-                        "observation/wrist_image": wrist_img,
-                        "observation/state": np.concatenate(
-                            (
-                                obs["robot0_eef_pos"],
-                                _quat2axisangle(obs["robot0_eef_quat"]),
-                                obs["robot0_gripper_qpos"],
-                            )
-                        ),
-                        "prompt": str(variant.task_description),
-                    }
-    elif variant.env == 'aloha_cube':
-        img = np.ascontiguousarray(obs["pixels"]["top"])
-        img = image_tools.convert_to_uint8(
-            image_tools.resize_with_pad(img, 224, 224)
-        )
-        obs_pi_zero = {
-            "state": obs["agent_pos"],
-            "images": {"cam_high": np.transpose(img, (2,0,1))}
-        }
-    else:
-        raise NotImplementedError()
+    img = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
+    wrist_img = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
+    img = image_tools.convert_to_uint8(
+        image_tools.resize_with_pad(img, 224, 224)
+    )
+    wrist_img = image_tools.convert_to_uint8(
+        image_tools.resize_with_pad(wrist_img, 224, 224)
+    )
+
+    obs_pi_zero = {
+                    "observation/image": img,
+                    "observation/wrist_image": wrist_img,
+                    "observation/state": np.concatenate(
+                        (
+                            obs["robot0_eef_pos"],
+                            _quat2axisangle(obs["robot0_eef_quat"]),
+                            obs["robot0_gripper_qpos"],
+                        )
+                    ),
+                    "prompt": str(variant.task_description),
+                }
     return obs_pi_zero
 
 def obs_to_qpos(obs, variant):
-    if variant.env == 'libero':
-        qpos = np.concatenate(
-            (
-                obs["robot0_eef_pos"],
-                _quat2axisangle(obs["robot0_eef_quat"]),
-                obs["robot0_gripper_qpos"],
-            )
+    qpos = np.concatenate(
+        (
+            obs["robot0_eef_pos"],
+            _quat2axisangle(obs["robot0_eef_quat"]),
+            obs["robot0_gripper_qpos"],
         )
-    elif variant.env == 'aloha_cube':
-        qpos = obs["agent_pos"]
-    else:
-        raise NotImplementedError()
+    )
     return qpos
 
 def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_replay_buffer, replay_buffer, wandb_logger,
@@ -319,10 +297,7 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
 
     agent._rng, rng = jax.random.split(agent._rng)
     
-    if 'libero' in variant.env:
-        obs = env.reset()
-    elif 'aloha' in variant.env:
-        obs, _ = env.reset()
+    obs = env.reset()
     
     image_list = [] # for visualization
     rewards = []
@@ -368,11 +343,7 @@ def collect_traj(variant, agent, env, i, agent_dp=None):
             obs_list.append(obs_dict)
      
         action_t = actions[t % query_frequency]
-        if 'libero' in variant.env:
-            obs, reward, done, _ = env.step(action_t)
-        elif 'aloha' in variant.env:
-            obs, reward, terminated, truncated, _ = env.step(action_t)
-            done = terminated or truncated
+        obs, reward, done, _ = env.step(action_t)
             
         rewards.append(reward)
         image_list.append(curr_image)
@@ -432,10 +403,7 @@ def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None):
     rng = jax.random.PRNGKey(variant.seed+456)
 
     for rollout_id in range(variant.eval_episodes):
-        if 'libero' in variant.env:
-            obs = env.reset()
-        elif 'aloha' in variant.env:
-            obs, _ = env.reset()
+        obs = env.reset()
             
         image_list = [] # for visualization
         rewards = []
@@ -474,12 +442,7 @@ def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None):
                 actions = agent_dp.infer(obs_pi_zero, noise=noise)["actions"]
               
             action_t = actions[t % query_frequency]
-            
-            if 'libero' in variant.env:
-                obs, reward, done, _ = env.step(action_t)
-            elif 'aloha' in variant.env:
-                obs, reward, terminated, truncated, _ = env.step(action_t)
-                done = terminated or truncated
+            obs, reward, done, _ = env.step(action_t)
                 
             rewards.append(reward)
             image_list.append(curr_image)

@@ -1,6 +1,6 @@
 #! /usr/bin/env python
 import os
-# Tell XLA to use Triton GEMM, this improves steps/sec by ~30% on some GPUs from https://github.com/huggingface/gym-aloha/tree/main?tab=readme-ov-file#-gpu-rendering-egl
+# Tell XLA to use Triton GEMM; this improves steps/sec by ~30% on some GPUs.
 xla_flags = os.environ.get('XLA_FLAGS', '')
 xla_flags += ' --xla_gpu_triton_gemm_any=True'
 os.environ['XLA_FLAGS'] = xla_flags
@@ -15,7 +15,7 @@ sys.path.append('/global/home/users/r112358/dsrl_pi0/examples/classifier')
 from buffer import LabelBuffer
 from classifier import Classifier
 from gail import GailClassifier
-import pathlib, copy
+import pathlib
 import time
 import jax
 from jaxrl2.agents.pixel_sac.pixel_sac_learner import PixelSACLearner
@@ -23,7 +23,6 @@ from jaxrl2.utils.general_utils import add_batch_dim
 import numpy as np
 
 import gymnasium as gym
-import gym_aloha
 from gym.spaces import Dict, Box
 
 from libero.libero import benchmark
@@ -77,11 +76,7 @@ class DummyEnv(gym.ObservationWrapper):
         obs_dict = {}
         obs_dict['pixels'] = Box(low=0, high=255, shape=self.image_shape, dtype=np.uint8)
         if variant.add_states:
-            if variant.env == 'libero':
-                state_dim = 8
-            elif variant.env == 'aloha_cube':
-                state_dim = 14
-            obs_dict['state'] = Box(low=-1.0, high=1.0, shape=(state_dim, 1), dtype=np.float32)
+            obs_dict['state'] = Box(low=-1.0, high=1.0, shape=(8, 1), dtype=np.float32)
         self.observation_space = Dict(obs_dict)
         self.action_space = Box(low=-1, high=1, shape=(1, 32,), dtype=np.float32) # 32 is the noise action space of pi 0
 
@@ -126,29 +121,17 @@ def main(variant):
         os.makedirs(outputdir)
     print('writing to output dir ', outputdir)
     
-    if variant.env == 'libero':
-        benchmark_dict = benchmark.get_benchmark_dict()
-        task_suite = benchmark_dict["libero_90"]()
-        task_id = variant.task_id
-        task = task_suite.get_task(task_id)
-        env, task_description = _get_libero_env(task, 256, variant.seed)
-        eval_env = env
-        variant.task_description = task_description
-        variant.env_max_reward = 1
-        variant.max_timesteps = 400
-    elif variant.env == 'aloha_cube':
-        from gymnasium.envs.registration import register
-        register(
-            id="gym_aloha/AlohaTransferCube-v0",
-            entry_point="gym_aloha.env:AlohaEnv",
-            max_episode_steps=400,
-            nondeterministic=True,
-            kwargs={"obs_type": "pixels", "task": "transfer_cube"},
-        )
-        env = gym.make("gym_aloha/AlohaTransferCube-v0", obs_type="pixels_agent_pos", render_mode="rgb_array")
-        eval_env = copy.deepcopy(env)
-        variant.env_max_reward = 4
-        variant.max_timesteps = 400
+    if variant.env != 'libero':
+        raise NotImplementedError(f"Only Libero is supported, got env={variant.env}")
+    benchmark_dict = benchmark.get_benchmark_dict()
+    task_suite = benchmark_dict["libero_90"]()
+    task_id = variant.task_id
+    task = task_suite.get_task(task_id)
+    env, task_description = _get_libero_env(task, 256, variant.seed)
+    eval_env = env
+    variant.task_description = task_description
+    variant.env_max_reward = 1
+    variant.max_timesteps = 400
         
 
     group_name = variant.prefix + '_' + variant.launch_group_id
@@ -171,15 +154,9 @@ def main(variant):
     else:
         classifier = buffer = None
 
-    if variant.env == 'libero':
-        config = openpi_config.get_config("pi0_libero")
-        #checkpoint_dir = download.maybe_download("s3://openpi-assets/checkpoints/pi0_libero")
-        checkpoint_dir = "/global/scratch/users/r112358/checkpoints/pi0_libero"
-    elif variant.env == 'aloha_cube':
-        config = openpi_config.get_config("pi0_aloha_sim")
-        checkpoint_dir = download.maybe_download("s3://openpi-assets/checkpoints/pi0_aloha_sim")
-    else:
-        raise NotImplementedError()
+    config = openpi_config.get_config("pi0_libero")
+    #checkpoint_dir = download.maybe_download("s3://openpi-assets/checkpoints/pi0_libero")
+    checkpoint_dir = "/global/scratch/users/r112358/checkpoints/pi0_libero"
     agent_dp = policy_config.create_trained_policy(config, checkpoint_dir)
     print("Loaded pi0 policy from %s", checkpoint_dir)
     agent = PixelSACLearner(variant.seed, sample_obs, sample_action, **kwargs, classifier=classifier)
