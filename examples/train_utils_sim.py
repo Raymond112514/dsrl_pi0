@@ -142,7 +142,10 @@ def compute_action_chunk(
 
 def log_basis_explained_variance(wandb_logger, basis, step=0):
     btype = getattr(basis, 'basis_type', 'pca')
-    type_code = {'pca': 0, 'random': 1, 'vae': 2, 'vae_linear': 3, 'flow': 4}.get(btype, -1)
+    type_code = {
+        'pca': 0, 'random': 1, 'vae': 2, 'vae_linear': 3, 'flow': 4,
+        'dct_low': 5, 'dct_high': 6,
+    }.get(btype, -1)
     metrics = {
         'basis/num_components': basis.num_basis,
         'basis/type': type_code,

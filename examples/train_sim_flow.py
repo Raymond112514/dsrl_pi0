@@ -20,6 +20,7 @@ def main(variant):
     variant.use_vae_basis = False
     variant.use_eigenbasis = False
     variant.use_random_basis = False
+    variant.use_dct_basis = False
     if getattr(variant, "q_base_action", False):
         raise ValueError("--q_base_action is not supported for flow residual RL")
     # num_basis is set in train_sim once query_freq / env_action_dim are known.

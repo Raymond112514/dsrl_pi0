@@ -18,25 +18,75 @@ VALID_BASIS_ROLES = ("both", "actor", "critic")
 
 
 def uses_projected_basis(variant) -> bool:
-    """True when SAC acts in projected residual space (PCA / random / VAE / flow).
+    """True when SAC acts in projected residual space (PCA / random / DCT / VAE / flow).
 
-    For VAE/PCA/random this is K-dim; for flow matching it is full chunk dim D
+    For VAE/PCA/random/DCT this is K-dim; for flow matching it is full chunk dim D
     (still routed through basis.coeffs_to_chunk).
     """
     return bool(
         getattr(variant, "use_eigenbasis", False)
         or getattr(variant, "use_random_basis", False)
+        or getattr(variant, "use_dct_basis", False)
         or getattr(variant, "use_vae_basis", False)
         or getattr(variant, "use_flow_basis", False)
     )
 
 
 def uses_linear_basis(variant) -> bool:
-    """PCA / random orthonormal bases (support --basis_role ablations)."""
+    """PCA / random / DCT orthonormal bases (support --basis_role ablations)."""
     return bool(
         getattr(variant, "use_eigenbasis", False)
         or getattr(variant, "use_random_basis", False)
+        or getattr(variant, "use_dct_basis", False)
     )
+
+
+def _dct_ii_orthonormal(n: int) -> np.ndarray:
+    """1D orthonormal DCT-II basis, columns are modes k = 0..n-1."""
+    n = int(n)
+    t = np.arange(n, dtype=np.float64)[:, None]
+    k = np.arange(n, dtype=np.float64)[None, :]
+    psi = np.cos(np.pi * (2.0 * t + 1.0) * k / (2.0 * n))
+    psi *= np.sqrt(2.0 / n)
+    psi[:, 0] = np.sqrt(1.0 / n)
+    return psi
+
+
+def _dct_mode_pairs(query_freq: int, action_dim: int) -> list[tuple[int, int]]:
+    """All (u, v) pairs in JPEG diagonal order: (u+v, u, v)."""
+    pairs = [(u, v) for u in range(int(query_freq)) for v in range(int(action_dim))]
+    pairs.sort(key=lambda p: (p[0] + p[1], p[0], p[1]))
+    return pairs
+
+
+def dct_basis_matrix(
+    num_basis: int,
+    query_freq: int,
+    action_dim: int,
+    freq: str = "low",
+) -> tuple[np.ndarray, list[tuple[int, int]]]:
+    """2D DCT-II columns F (D, K) and the selected (u, v) mode pairs."""
+    t, a = int(query_freq), int(action_dim)
+    k = int(num_basis)
+    d = t * a
+    if k < 1:
+        raise ValueError(f"num_basis must be >= 1, got {k}")
+    if k > d:
+        raise ValueError(f"num_basis={k} exceeds feature_dim={d}")
+    freq = str(freq or "low").lower()
+    if freq not in ("low", "high"):
+        raise ValueError(f"--dct_freq must be 'low' or 'high', got {freq!r}")
+
+    psi_t = _dct_ii_orthonormal(t)
+    psi_a = _dct_ii_orthonormal(a)
+    pairs = _dct_mode_pairs(t, a)
+    selected = pairs[:k] if freq == "low" else list(reversed(pairs[-k:]))
+
+    F = np.empty((d, k), dtype=np.float64)
+    for i, (u, v) in enumerate(selected):
+        # Row-major flatten of (T, A), matching a_base.reshape(-1).
+        F[:, i] = np.outer(psi_t[:, u], psi_a[:, v]).reshape(-1)
+    return F, selected
 
 
 def get_basis_role(variant) -> str:
@@ -81,7 +131,7 @@ class ResidualActionBasis:
     query_freq: int
     action_dim: int = 7
     explained_variance_ratio: np.ndarray | None = None
-    basis_type: str = "pca"  # "pca" | "random"
+    basis_type: str = "pca"  # "pca" | "random" | "dct_low" | "dct_high"
 
     @property
     def num_basis(self) -> int:
@@ -146,6 +196,28 @@ class ResidualActionBasis:
             action_dim=int(action_dim),
             explained_variance_ratio=None,
             basis_type="random",
+        )
+
+    @classmethod
+    def dct(
+        cls,
+        num_basis: int,
+        query_freq: int,
+        action_dim: int = 7,
+        freq: str = "low",
+    ) -> ResidualActionBasis:
+        """Frozen 2D DCT-II basis: a = a_base + λ F c. No warmup / data fit."""
+        F, pairs = dct_basis_matrix(num_basis, query_freq, action_dim, freq=freq)
+        feature_dim = int(query_freq) * int(action_dim)
+        freq = str(freq or "low").lower()
+        print(f"DCT-{freq} (u,v) modes: {pairs}")
+        return cls(
+            mean=np.zeros(feature_dim, dtype=np.float32),
+            V=F.astype(np.float32),
+            query_freq=int(query_freq),
+            action_dim=int(action_dim),
+            explained_variance_ratio=None,
+            basis_type=f"dct_{freq}",
         )
 
     def save(self, path: str | Path) -> None:

@@ -122,6 +122,7 @@ if __name__ == "__main__":
     variant.use_vae_basis = True
     variant.use_eigenbasis = False
     variant.use_random_basis = False
+    variant.use_dct_basis = False
     if getattr(variant, "vae_path", "") == "" and getattr(variant, "basis_path", ""):
         variant.vae_path = variant.basis_path
     # Prefer explicit latent dim.

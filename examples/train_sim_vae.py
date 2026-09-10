@@ -18,6 +18,7 @@ def main(variant):
     variant.use_vae_basis = True
     variant.use_eigenbasis = False
     variant.use_random_basis = False
+    variant.use_dct_basis = False
     # Align SAC / DummyEnv dim with VAE latent size.
     latent = int(getattr(variant, "vae_latent_dim", getattr(variant, "num_basis", 8)))
     variant.vae_latent_dim = latent

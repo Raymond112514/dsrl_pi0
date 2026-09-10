@@ -70,6 +70,17 @@ if __name__ == '__main__':
         action='store_true',
         help='Ablation: same K-dim residual as eigenbasis but with a random orthonormal V',
     )
+    parser.add_argument(
+        '--use_dct_basis',
+        action='store_true',
+        help='Train SAC in K-dim 2D DCT-II coefficient space (a = a_base + lambda * F @ c)',
+    )
+    parser.add_argument(
+        '--dct_freq',
+        default='low',
+        choices=['low', 'high'],
+        help='DCT mode set: low = first K JPEG (u+v,u,v) modes; high = last K (Nyquist).',
+    )
     parser.add_argument('--num_basis', default=8, type=int, help='Number of basis components for projected residual')
     parser.add_argument('--warmup_rollouts', default=20, type=int, help='Rollouts before PCA fit (eigenbasis) and SAC updates')
     parser.add_argument('--basis_path', default='', help='Optional pre-fit residual_basis.npz (skips online PCA)')
@@ -87,8 +98,8 @@ if __name__ == '__main__':
         default='both',
         choices=['both', 'actor', 'critic'],
         help=(
-            'PCA/random ablation of who uses the basis (requires --use_eigenbasis or '
-            '--use_random_basis). both: actor+critic on coeffs c; '
+            'Linear-basis ablation of who uses the basis (requires --use_eigenbasis, '
+            '--use_random_basis, or --use_dct_basis). both: actor+critic on coeffs c; '
             'critic: actor outputs c, Q trains on residual V@c; '
             'actor: actor outputs full residual r, Q trains on projected c=V^T r. '
             'Mutually exclusive with --q_base_action.'

@@ -115,7 +115,12 @@ def build_exp_name(variant):
     elif getattr(variant, 'use_flow_basis', False):
         parts.append(f"D{variant.num_basis}_flow")
     elif uses_projected_basis(variant):
-        tag = "rand" if getattr(variant, 'use_random_basis', False) else "pca"
+        if getattr(variant, 'use_dct_basis', False):
+            tag = f"dct_{getattr(variant, 'dct_freq', 'low')}"
+        elif getattr(variant, 'use_random_basis', False):
+            tag = "rand"
+        else:
+            tag = "pca"
         parts.append(f"K{variant.num_basis}_{tag}")
         if uses_linear_basis(variant):
             role = get_basis_role(variant)
@@ -131,13 +136,14 @@ def maybe_init_basis(variant):
     modes = [
         bool(getattr(variant, 'use_eigenbasis', False)),
         bool(getattr(variant, 'use_random_basis', False)),
+        bool(getattr(variant, 'use_dct_basis', False)),
         bool(getattr(variant, 'use_vae_basis', False)),
         bool(getattr(variant, 'use_flow_basis', False)),
     ]
     if sum(modes) > 1:
         raise ValueError(
             "Pass only one of --use_eigenbasis / --use_random_basis / "
-            "--use_vae_basis / --use_flow_basis"
+            "--use_dct_basis / --use_vae_basis / --use_flow_basis"
         )
 
     if getattr(variant, 'use_flow_basis', False):
@@ -200,7 +206,7 @@ def maybe_init_basis(variant):
             return basis
         return None
 
-    if getattr(variant, 'use_random_basis', False):
+    if getattr(variant, 'use_random_basis', False) or getattr(variant, 'use_dct_basis', False):
         if variant.get('basis_path', ''):
             raise ValueError(
                 "--basis_path is only supported with --use_eigenbasis / "
@@ -209,6 +215,21 @@ def maybe_init_basis(variant):
         action_dim = int(variant.env_action_dim)
         # Prefer query_freq so residual reshape matches collect; falls back to horizon.
         query_freq = int(variant.query_freq if variant.query_freq > 0 else variant.pi0_action_horizon)
+        if getattr(variant, 'use_dct_basis', False):
+            freq = str(getattr(variant, 'dct_freq', 'low') or 'low')
+            basis = ResidualActionBasis.dct(
+                num_basis=int(variant.num_basis),
+                query_freq=query_freq,
+                action_dim=action_dim,
+                freq=freq,
+            )
+            save_path = os.path.join(variant.outputdir, "residual_basis.npz")
+            basis.save(save_path)
+            print(
+                f"Initialized 2D DCT-II basis freq={freq} K={basis.num_basis} "
+                f"D={basis.feature_dim} -> {save_path}"
+            )
+            return basis
         basis = ResidualActionBasis.random(
             num_basis=int(variant.num_basis),
             query_freq=query_freq,
@@ -398,7 +419,7 @@ def main(variant):
         basis_role = get_basis_role(variant)
     elif str(getattr(variant, 'basis_role', 'both') or 'both').lower() != 'both':
         raise ValueError(
-            '--basis_role is only supported with --use_eigenbasis / --use_random_basis'
+            '--basis_role is only supported with --use_eigenbasis / --use_random_basis / --use_dct_basis'
         )
 
     q_base_action = bool(getattr(variant, 'q_base_action', False))
