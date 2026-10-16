@@ -33,7 +33,7 @@ def obs_to_img(obs, variant):
     '''
     if variant.env == 'libero':
         curr_image = obs["agentview_image"][::-1, ::-1]
-    elif variant.env == 'aloha_cube':
+    elif variant.env in ('aloha_cube', 'aloha_insertion'):
         curr_image = obs["pixels"]["top"]
     else:
         raise NotImplementedError()
@@ -64,6 +64,9 @@ def obs_to_pi_zero_input(obs, variant):
                         ),
                         "prompt": str(variant.task_description),
                     }
+    elif variant.env == 'aloha_insertion':
+        # ACT was trained on the raw gym observation, not the pi0 camera packing.
+        return obs
     elif variant.env == 'aloha_cube':
         img = np.ascontiguousarray(obs["pixels"]["top"])
         img = image_tools.convert_to_uint8(
@@ -86,40 +89,144 @@ def obs_to_qpos(obs, variant):
                 obs["robot0_gripper_qpos"],
             )
         )
-    elif variant.env == 'aloha_cube':
+    elif variant.env in ('aloha_cube', 'aloha_insertion'):
         qpos = obs["agent_pos"]
     else:
         raise NotImplementedError()
     return qpos
 
+def _executed_base_chunk(a_base, variant):
+    """Use the first query_freq steps as the effective base-policy chunk."""
+    chunk = np.asarray(a_base)
+    if chunk.ndim == 3 and chunk.shape[0] == 1:
+        chunk = chunk[0]
+    env_action_dim = getattr(variant, 'env_action_dim', None)
+    if env_action_dim is not None:
+        chunk = chunk[..., :env_action_dim]
+    query_freq = variant.query_freq
+    if query_freq > chunk.shape[0]:
+        raise ValueError(
+            f"query_freq={query_freq} exceeds inferred action chunk length {chunk.shape[0]}"
+        )
+    return chunk[:query_freq]
+
+
+def _sample_pi0_chunks_at_state(variant, agent_dp, rng, obs_pi_zero, first_chunk, n_samples):
+    """Return n_samples flattened π0 chunks at one observation.
+
+    `first_chunk` is the chunk already inferred for execution. The rest are
+    new diffusion samples at the same observation.
+    """
+    n_samples = int(n_samples)
+    if n_samples < 2:
+        raise ValueError(f"Need >=2 chunks per state, got {n_samples}")
+    samples = [np.asarray(first_chunk, dtype=np.float64).reshape(-1)]
+    for _ in range(n_samples - 1):
+        rng, key = jax.random.split(rng)
+        noise = jax.random.normal(key, (1, variant.pi0_action_horizon, variant.pi0_action_dim))
+        raw = agent_dp.infer(obs_pi_zero, noise=noise)["actions"]
+        samples.append(_executed_base_chunk(raw, variant).reshape(-1).astype(np.float64))
+    return rng, samples
+
+
+def _ordered_pairwise_diffs(samples):
+    """All δ = a_i - a_j for i != j. Shape (K*(K-1), D)."""
+    arr = np.stack(samples, axis=0)
+    k = arr.shape[0]
+    ii, jj = np.meshgrid(np.arange(k), np.arange(k), indexing="ij")
+    mask = ii != jj
+    return arr[ii[mask]] - arr[jj[mask]]
+
+
 def compute_action_chunk(variant, agent, agent_dp, rng, obs_pi_zero, obs_dict, *, use_residual, basis=None):
     rng, key = jax.random.split(rng)
     noise = jax.random.normal(key, (1, variant.pi0_action_horizon, variant.pi0_action_dim))
     a_base = agent_dp.infer(obs_pi_zero, noise=noise)["actions"]
-    obs_dict = {**obs_dict, "action_diffusion": a_base.reshape(1, -1, 1)}
+    if getattr(variant, 'env_action_dim', None) is not None:
+        a_exec = _executed_base_chunk(a_base, variant)
+    else:
+        a_exec = np.asarray(a_base)
+        if a_exec.ndim == 3 and a_exec.shape[0] == 1:
+            a_exec = a_exec[0]
+    obs_dict = {**obs_dict, "action_diffusion": a_exec.reshape(1, -1, 1)}
 
-    if getattr(variant, 'use_eigenbasis', False):
-        num_basis = variant.num_basis
+    def _full_action(action_chunk):
+        return np.asarray(action_chunk, dtype=np.float32).reshape(1, -1)
+
+    if (
+        getattr(variant, 'use_eigenbasis', False)
+        or getattr(variant, 'use_vae', False)
+        or getattr(variant, 'use_flow', False)
+    ):
         if use_residual and basis is not None:
-            coeffs = agent.sample_actions(obs_dict)
-            if coeffs.ndim == 1:
-                coeffs = coeffs.reshape(1, -1)
-            res_chunk = basis.coeffs_to_chunk(coeffs[0], variant.residual_scale)
-            actions = a_base + res_chunk
-            stored_action = coeffs.astype(np.float32)
+            latents = agent.sample_actions(obs_dict)
+            if latents.ndim == 1:
+                latents = latents.reshape(1, -1)
+            if getattr(variant, 'use_vae', False):
+                state = None
+                if getattr(basis, 'condition_on_state', False):
+                    if 'state' not in obs_dict:
+                        raise ValueError(
+                            "State-conditioned VAE decode requires obs['state'] "
+                            "(--add_states 1)"
+                        )
+                    state = np.asarray(obs_dict['state'], dtype=np.float32).reshape(-1)
+                res_chunk = basis.latent_to_chunk(latents[0], variant.residual_scale, state=state)
+                actions = a_exec + res_chunk
+            elif getattr(variant, 'use_flow', False):
+                res_chunk = basis.latent_to_chunk(latents[0], variant.residual_scale)
+                actions = a_exec + res_chunk
+            else:
+                coeffs = np.asarray(latents, dtype=np.float32).reshape(-1)
+                mask = np.asarray(getattr(agent, "latent_mask", 1.0), dtype=np.float32).reshape(-1)
+                if mask.shape == coeffs.shape:
+                    coeffs = coeffs * mask
+                res_chunk = basis.coeffs_to_chunk(coeffs, variant.residual_scale)
+                actions = a_exec + res_chunk
         else:
-            actions = a_base
-            stored_action = np.zeros((1, num_basis), dtype=np.float32)
-        return rng, actions, stored_action, obs_dict
+            actions = a_exec
+        return rng, actions, _full_action(actions), obs_dict
 
     if use_residual:
-        a_res = agent.sample_actions(obs_dict).reshape(a_base.shape)
-        actions = a_base + variant.residual_scale * a_res
-        residual_flat = a_res.reshape(1, -1)
+        a_res = agent.sample_actions(obs_dict).reshape(a_exec.shape)
+        actions = a_exec + variant.residual_scale * a_res
     else:
-        actions = a_base
-        residual_flat = np.zeros((1, np.prod(a_base.shape)), dtype=np.float32)
-    return rng, actions, residual_flat, obs_dict
+        actions = a_exec
+    return rng, actions, _full_action(actions), obs_dict
+
+
+def pca_k_at_step(variant, step):
+    """Live PCA width at training step `step`. None when the curriculum is off.
+
+    The actor is built at `num_basis`. k starts at pca_k_start and grows by
+    pca_k_inc every pca_k_every training steps, the same counter as max_steps.
+    """
+    if not getattr(variant, "pca_k_curriculum", False):
+        return None
+    k = int(variant.pca_k_start) + int(variant.pca_k_inc) * (
+        int(step) // int(variant.pca_k_every)
+    )
+    return min(int(variant.num_basis), k)
+
+
+def sync_pca_curriculum(agent, variant, step, wandb_logger=None):
+    k = pca_k_at_step(variant, step)
+    if k is None or not hasattr(agent, "set_pca_latent_k"):
+        return
+    if agent.set_pca_latent_k(k):
+        print_green(
+            f"pca latent mask k={k}/{int(variant.num_basis)} at step={int(step)}"
+        )
+        if wandb_logger is not None:
+            wandb_logger.log({"basis/active_k": int(k)}, step=int(step))
+
+
+def uses_latent_residual(variant):
+    return (
+        getattr(variant, 'use_eigenbasis', False)
+        or getattr(variant, 'use_vae', False)
+        or getattr(variant, 'use_flow', False)
+    )
 
 
 def log_basis_explained_variance(wandb_logger, basis, step=0):
@@ -135,6 +242,24 @@ def log_basis_explained_variance(wandb_logger, basis, step=0):
     wandb_logger.log(metrics, step=step)
     per_pc = ', '.join(f'PC{i}={explained[i]:.4f}' for i in range(len(explained)))
     print_green(f'Basis explained variance: total={explained.sum():.4f} ({per_pc})')
+
+
+def log_vae_fit_metrics(wandb_logger, residual_vae, step=0):
+    metrics = residual_vae.fit_metrics or {}
+    log = {f'vae/{k}': float(v) for k, v in metrics.items()}
+    log['vae/latent_dim'] = float(residual_vae.latent_dim)
+    log['vae/feature_dim'] = float(residual_vae.feature_dim)
+    log['vae/fit_residual'] = float(getattr(residual_vae, 'fit_residual', True))
+    log['vae/condition_on_state'] = float(getattr(residual_vae, 'condition_on_state', False))
+    log['vae/state_dim'] = float(getattr(residual_vae, 'cond_dim', 0))
+    if log:
+        wandb_logger.log(log, step=step)
+    print_green(
+        f"VAE fit: latent_dim={residual_vae.latent_dim}  "
+        f"val_recon={metrics.get('val_recon_loss', float('nan')):.5f}  "
+        f"val_kl={metrics.get('val_kl', float('nan')):.4f}  "
+        f"val_ev={metrics.get('val_explained_var', float('nan')):.4f}"
+    )
 
 
 def fit_basis_from_warmup_chunks(variant, warmup_chunks):
@@ -155,6 +280,92 @@ def fit_basis_from_warmup_chunks(variant, warmup_chunks):
     )
     return basis
 
+
+def log_flow_fit_metrics(wandb_logger, residual_flow, step=0):
+    metrics = residual_flow.fit_metrics or {}
+    log = {f'flow/{k}': float(v) for k, v in metrics.items()}
+    log['flow/latent_dim'] = float(residual_flow.latent_dim)
+    log['flow/n_steps'] = float(residual_flow.n_steps)
+    log['flow/fit_residual'] = float(getattr(residual_flow, 'fit_residual', True))
+    if log:
+        wandb_logger.log(log, step=step)
+    print_green(
+        f"Flow fit: latent_dim={residual_flow.latent_dim}  "
+        f"ode_steps={residual_flow.n_steps}  "
+        f"val_loss={metrics.get('val_loss', float('nan')):.5f}  "
+        f"val_recon={metrics.get('val_recon_loss', float('nan')):.5f}  "
+        f"val_ev={metrics.get('val_explained_var', float('nan')):.4f}"
+    )
+
+
+def fit_flow_from_warmup_chunks(variant, warmup_chunks):
+    from examples.residual_flow import fit_residual_flow
+
+    action_dim = 7 if variant.env == 'libero' else 14
+    residual_flow = fit_residual_flow(
+        np.stack(warmup_chunks, axis=0),
+        query_freq=variant.query_freq,
+        action_dim=action_dim,
+        epochs=getattr(variant, 'flow_epochs', 100),
+        n_steps=getattr(variant, 'flow_steps', 10),
+        seed=getattr(variant, 'seed', 0),
+        fit_residual=getattr(variant, 'fit_residual', True),
+    )
+    residual_flow.decode_add_mean = bool(getattr(variant, "decode_add_mean", True))
+    save_path = os.path.join(variant.outputdir, "residual_flow.pkl")
+    residual_flow.save(save_path)
+    kind = "residual" if residual_flow.fit_residual else "action"
+    print_green(
+        f"Fitted {kind} flow (D={residual_flow.latent_dim}, "
+        f"ode_steps={residual_flow.n_steps}, epochs={getattr(variant, 'flow_epochs', 100)}, "
+        f"decode_add_mean={residual_flow.decode_add_mean}) "
+        f"on {len(warmup_chunks)} chunks from {variant.warmup_rollouts} warmup trajectories"
+    )
+    return residual_flow
+
+
+def fit_vae_from_warmup_chunks(variant, warmup_chunks, warmup_states=None):
+    from examples.residual_vae import fit_residual_vae
+
+    action_dim = 7 if variant.env == 'libero' else 14
+    condition = bool(getattr(variant, 'vae_condition_on_state', False))
+    states = None
+    if condition:
+        if not warmup_states or len(warmup_states) != len(warmup_chunks):
+            raise ValueError(
+                f"State-conditioned VAE expected {len(warmup_chunks)} states, "
+                f"got {0 if not warmup_states else len(warmup_states)}"
+            )
+        states = np.stack(warmup_states, axis=0)
+    residual_vae = fit_residual_vae(
+        np.stack(warmup_chunks, axis=0),
+        latent_dim=variant.num_basis,
+        query_freq=variant.query_freq,
+        action_dim=action_dim,
+        beta=getattr(variant, 'vae_beta', 1e-3),
+        epochs=getattr(variant, 'vae_epochs', 100),
+        seed=getattr(variant, 'seed', 0),
+        fit_residual=getattr(variant, 'fit_residual', True),
+        states=states,
+        condition_on_state=condition,
+    )
+    residual_vae.decode_add_mean = bool(getattr(variant, "decode_add_mean", True))
+    save_path = os.path.join(variant.outputdir, "residual_vae.pkl")
+    residual_vae.save(save_path)
+    kind = "residual" if residual_vae.fit_residual else "action"
+    cond = ""
+    if residual_vae.condition_on_state:
+        n_per = int(getattr(variant, 'vae_samples_per_state', 16)) if residual_vae.fit_residual else 1
+        cond = f", state_dim={residual_vae.cond_dim}, samples_per_state={n_per}"
+    print_green(
+        f"Fitted {kind} VAE (K={residual_vae.latent_dim}, beta={getattr(variant, 'vae_beta', 1e-3)}, "
+        f"epochs={getattr(variant, 'vae_epochs', 100)}, decode_add_mean={residual_vae.decode_add_mean}"
+        f"{cond}) "
+        f"on {len(warmup_chunks)} targets from "
+        f"{variant.warmup_rollouts} warmup trajectories"
+    )
+    return residual_vae
+
 def should_use_residual(variant, i):
     if getattr(variant, 'collect_with_residual', False):
         return True
@@ -172,18 +383,21 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
     warmup_rollouts = getattr(variant, 'warmup_rollouts', 20)
     basis = getattr(variant, 'basis', None)
     warmup_chunks = []
+    warmup_states = []
     wandb_logger.log({'num_online_samples': 0}, step=i)
     wandb_logger.log({'num_online_trajs': 0}, step=i)
     wandb_logger.log({'env_steps': 0}, step=i)
     
     with tqdm(total=variant.max_steps, initial=0) as pbar:
         while i <= variant.max_steps:
+            sync_pca_curriculum(agent, variant, i, wandb_logger)
             traj = collect_traj(variant, agent, env, i, agent_dp, basis=basis)
             num_traj += 1
             traj_id = online_replay_buffer._traj_counter
             add_online_data_to_buffer(variant, traj, online_replay_buffer)
-            if basis is None and getattr(variant, 'use_eigenbasis', False):
+            if basis is None and uses_latent_residual(variant):
                 warmup_chunks.extend(traj.get('pi0_chunks', []))
+                warmup_states.extend(traj.get('pi0_states', []))
             total_env_steps += traj['env_steps']
             print('online buffer timesteps length:', len(online_replay_buffer))
             print('online buffer num traj:', traj_id + 1)
@@ -191,12 +405,24 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
 
             if (
                 basis is None
-                and getattr(variant, 'use_eigenbasis', False)
+                and uses_latent_residual(variant)
                 and num_traj >= warmup_rollouts
             ):
-                basis = fit_basis_from_warmup_chunks(variant, warmup_chunks)
-                variant.basis = basis
-                log_basis_explained_variance(wandb_logger, basis, step=i)
+                if getattr(variant, 'use_vae', False):
+                    basis = fit_vae_from_warmup_chunks(variant, warmup_chunks, warmup_states)
+                    variant.basis = basis
+                    agent.set_residual_vae(basis)
+                    log_vae_fit_metrics(wandb_logger, basis, step=i)
+                elif getattr(variant, 'use_flow', False):
+                    basis = fit_flow_from_warmup_chunks(variant, warmup_chunks)
+                    variant.basis = basis
+                    agent.set_residual_flow(basis)
+                    log_flow_fit_metrics(wandb_logger, basis, step=i)
+                else:
+                    basis = fit_basis_from_warmup_chunks(variant, warmup_chunks)
+                    variant.basis = basis
+                    agent.set_residual_basis(basis.V)
+                    log_basis_explained_variance(wandb_logger, basis, step=i)
             
             if variant.get("num_online_gradsteps_batch", -1) > 0:
                 num_gradsteps = variant.num_online_gradsteps_batch
@@ -206,6 +432,7 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
             if num_traj >= warmup_rollouts:
                 print_green(f"Updating time at {i}")
                 for _ in range(num_gradsteps):
+                    sync_pca_curriculum(agent, variant, i, wandb_logger)
                     if i == 0:
                         print('performing evaluation for initial checkpoint')
                         if perform_control_evals:
@@ -294,6 +521,7 @@ def collect_traj(variant, agent, env, i, agent_dp=None, basis=None):
     action_list = []
     obs_list = []
     pi0_chunks = []
+    pi0_states = []
 
     for t in tqdm(range(max_timesteps)):
         curr_image = obs_to_img(obs, variant)
@@ -316,7 +544,7 @@ def collect_traj(variant, agent, env, i, agent_dp=None, basis=None):
             rng, key = jax.random.split(rng)
             obs_pi_zero = obs_to_pi_zero_input(obs, variant)
             use_residual = should_use_residual(variant, i) and (
-                basis is not None or not getattr(variant, 'use_eigenbasis', False)
+                basis is not None or not uses_latent_residual(variant)
             )
             rng, actions, stored_action, obs_dict = compute_action_chunk(
                 variant, agent, agent_dp, rng, obs_pi_zero, obs_dict,
@@ -324,8 +552,28 @@ def collect_traj(variant, agent, env, i, agent_dp=None, basis=None):
             )
             action_list.append(stored_action)
             obs_list.append(obs_dict)
-            if basis is None and getattr(variant, 'use_eigenbasis', False):
-                pi0_chunks.append(obs_dict['action_diffusion'].reshape(-1).astype(np.float64))
+            if basis is None and uses_latent_residual(variant):
+                chunk = obs_dict['action_diffusion'].reshape(-1).astype(np.float64)
+                if (
+                    getattr(variant, 'use_vae', False)
+                    and getattr(variant, 'vae_condition_on_state', False)
+                ):
+                    # Pair each target with this query's proprio. Residual targets
+                    # are ordered pairwise diffs of K π0 samples at this state.
+                    qpos_vec = np.asarray(qpos, dtype=np.float32).reshape(-1)
+                    if getattr(variant, 'fit_residual', True):
+                        n_samples = int(getattr(variant, 'vae_samples_per_state', 16))
+                        rng, samples = _sample_pi0_chunks_at_state(
+                            variant, agent_dp, rng, obs_pi_zero, chunk, n_samples,
+                        )
+                        for diff in _ordered_pairwise_diffs(samples):
+                            pi0_chunks.append(diff)
+                            pi0_states.append(qpos_vec)
+                    else:
+                        pi0_chunks.append(chunk)
+                        pi0_states.append(qpos_vec)
+                else:
+                    pi0_chunks.append(chunk)
      
         action_t = actions[t % query_frequency]
         if 'libero' in variant.env:
@@ -384,6 +632,7 @@ def collect_traj(variant, agent, env, i, agent_dp=None, basis=None):
         'images': image_list,
         'env_steps': t + 1,
         'pi0_chunks': pi0_chunks,
+        'pi0_states': pi0_states,
     }
 
 def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None, basis=None):
@@ -427,7 +676,7 @@ def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None, ba
                 
                 obs_pi_zero = obs_to_pi_zero_input(obs, variant)
                 use_residual = i > 0 and (
-                    basis is not None or not getattr(variant, 'use_eigenbasis', False)
+                    basis is not None or not uses_latent_residual(variant)
                 )
                 rng, actions, _, obs_dict = compute_action_chunk(
                     variant, agent, agent_dp, rng, obs_pi_zero, obs_dict,

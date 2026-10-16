@@ -5,12 +5,36 @@ import jax
 import jax.numpy as jnp
 from flax.training.train_state import TrainState
 
+from jaxrl2.agents.pixel_sac.action_transform import maybe_residual_to_full_actions
 from jaxrl2.data.dataset import DatasetDict
 from jaxrl2.types import Params, PRNGKey
 
 
 def update_actor(key: PRNGKey, actor: TrainState, critic: TrainState,
-                 temp: TrainState, batch: DatasetDict, cross_norm:bool=False, critic_reduction:str='min') -> Tuple[TrainState, Dict[str, float]]:
+                 temp: TrainState, batch: DatasetDict, cross_norm:bool=False, critic_reduction:str='min',
+                 residual_scale: float = 1.0,
+                 basis_V: jnp.ndarray = None,
+                 use_eigenbasis: bool = False,
+                 q_on_full_actions: bool = False,
+                 use_vae: bool = False,
+                 vae_params=None,
+                 vae_mean=None,
+                 vae_std=None,
+                 vae_input_dim: int = 0,
+                 vae_latent_dim: int = 0,
+                 vae_hidden_dims=(256, 256),
+                 vae_cond_dim: int = 0,
+                 vae_state_mean=None,
+                 vae_state_std=None,
+                 use_flow: bool = False,
+                 flow_params=None,
+                 flow_mean=None,
+                 flow_std=None,
+                 flow_dim: int = 0,
+                 flow_hidden_dims=(256, 256, 256),
+                 flow_steps: int = 10,
+                 fit_residual: bool = True,
+                 latent_mask=None) -> Tuple[TrainState, Dict[str, float]]:
     
     key, key_act = jax.random.split(key, num=2)
 
@@ -37,6 +61,33 @@ def update_actor(key: PRNGKey, actor: TrainState, critic: TrainState,
 
         
         actions, log_probs = dist.sample_and_log_prob(seed=key_act)
+        actions = maybe_residual_to_full_actions(
+            actions,
+            batch['observations'],
+            residual_scale,
+            basis_V,
+            use_eigenbasis,
+            q_on_full_actions,
+            use_vae=use_vae,
+            vae_params=vae_params,
+            vae_mean=vae_mean,
+            vae_std=vae_std,
+            vae_input_dim=vae_input_dim,
+            vae_latent_dim=vae_latent_dim,
+            vae_hidden_dims=vae_hidden_dims,
+            vae_cond_dim=vae_cond_dim,
+            vae_state_mean=vae_state_mean,
+            vae_state_std=vae_state_std,
+            use_flow=use_flow,
+            flow_params=flow_params,
+            flow_mean=flow_mean,
+            flow_std=flow_std,
+            flow_dim=flow_dim,
+            flow_hidden_dims=flow_hidden_dims,
+            flow_steps=flow_steps,
+            fit_residual=fit_residual,
+            latent_mask=latent_mask,
+        )
 
         if hasattr(critic, 'batch_stats') and critic.batch_stats is not None:
             qs, _ = critic.apply_fn({'params': critic.params, 'batch_stats': critic.batch_stats}, batch['observations'],
