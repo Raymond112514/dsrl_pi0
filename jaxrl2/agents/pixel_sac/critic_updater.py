@@ -25,18 +25,13 @@ def update_critic(
         vae_input_dim: int = 0,
         vae_latent_dim: int = 0,
         vae_hidden_dims=(256, 256),
-        vae_cond_dim: int = 0,
-        vae_state_mean=None,
-        vae_state_std=None,
         use_flow: bool = False,
         flow_params=None,
         flow_mean=None,
         flow_std=None,
         flow_dim: int = 0,
         flow_hidden_dims=(256, 256, 256),
-        flow_steps: int = 10,
-        fit_residual: bool = True,
-        latent_mask=None) -> Tuple[TrainState, Dict[str, float]]:
+        flow_steps: int = 10) -> Tuple[TrainState, Dict[str, float]]:
     dist = actor.apply_fn({'params': actor.params}, batch['next_observations'])
     next_actions, next_log_probs = dist.sample_and_log_prob(seed=key)
     next_actions = maybe_residual_to_full_actions(
@@ -53,9 +48,6 @@ def update_critic(
         vae_input_dim=vae_input_dim,
         vae_latent_dim=vae_latent_dim,
         vae_hidden_dims=vae_hidden_dims,
-        vae_cond_dim=vae_cond_dim,
-        vae_state_mean=vae_state_mean,
-        vae_state_std=vae_state_std,
         use_flow=use_flow,
         flow_params=flow_params,
         flow_mean=flow_mean,
@@ -63,8 +55,6 @@ def update_critic(
         flow_dim=flow_dim,
         flow_hidden_dims=flow_hidden_dims,
         flow_steps=flow_steps,
-        fit_residual=fit_residual,
-        latent_mask=latent_mask,
     )
     next_qs = target_critic.apply_fn({'params': target_critic.params},
                                      batch['next_observations'], next_actions)

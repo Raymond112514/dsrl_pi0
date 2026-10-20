@@ -115,14 +115,6 @@ def build_exp_name(variant):
         parts.append(f"beta{getattr(variant, 'vae_beta', 1e-3)}")
     if getattr(variant, 'use_flow', False):
         parts.append(f"flow{getattr(variant, 'flow_steps', 10)}")
-    if not getattr(variant, 'fit_residual', True):
-        parts.append("actions")
-    if not getattr(variant, 'decode_add_mean', True):
-        parts.append("nomean")
-    if getattr(variant, 'vae_condition_on_state', False):
-        parts.append("scond")
-        if getattr(variant, 'fit_residual', True):
-            parts.append(f"n{int(getattr(variant, 'vae_samples_per_state', 16))}")
     return "_".join(parts)
 
 
@@ -158,7 +150,6 @@ def load_vae_if_provided(variant):
         from examples.residual_vae import ResidualVAE
         print(f"Loading residual VAE from {vae_path}")
         model = ResidualVAE.load(vae_path)
-        model.decode_add_mean = bool(getattr(variant, "decode_add_mean", True))
         return model
     return None
 
@@ -171,7 +162,6 @@ def load_flow_if_provided(variant):
         from examples.residual_flow import ResidualFlow
         print(f"Loading residual flow from {flow_path}")
         model = ResidualFlow.load(flow_path)
-        model.decode_add_mean = bool(getattr(variant, "decode_add_mean", True))
         return model
     return None
 
@@ -278,33 +268,6 @@ def main(variant):
     ]
     if len(latent_modes) > 1:
         raise ValueError(f"{' and '.join(latent_modes)} are mutually exclusive")
-    if not getattr(variant, 'fit_residual', True) and not (
-        getattr(variant, 'use_vae', False) or getattr(variant, 'use_flow', False)
-    ):
-        raise ValueError("--fit_residual false requires --use_vae or --use_flow")
-    if getattr(variant, 'vae_condition_on_state', False):
-        if not getattr(variant, 'use_vae', False):
-            raise ValueError("--vae_condition_on_state requires --use_vae")
-        if not getattr(variant, 'add_states', 1):
-            raise ValueError("--vae_condition_on_state requires --add_states 1")
-        n_state_samples = int(getattr(variant, 'vae_samples_per_state', 16))
-        if getattr(variant, 'fit_residual', True) and n_state_samples < 2:
-            raise ValueError("--vae_samples_per_state must be >= 2 when fitting residuals")
-    if getattr(variant, 'pca_k_curriculum', False):
-        if not getattr(variant, 'use_eigenbasis', False):
-            raise ValueError("--pca_k_curriculum requires --use_eigenbasis")
-        if int(variant.pca_k_start) < 1 or int(variant.pca_k_start) > int(variant.num_basis):
-            raise ValueError(
-                f"--pca_k_start must be in [1, num_basis], got {int(variant.pca_k_start)} "
-                f"and num_basis={int(variant.num_basis)}"
-            )
-        if int(variant.pca_k_inc) < 1 or int(variant.pca_k_every) < 1:
-            raise ValueError("--pca_k_inc and --pca_k_every must be >= 1")
-        print(
-            f"PCA curriculum: k={int(variant.pca_k_start)} "
-            f"+{int(variant.pca_k_inc)} every {int(variant.pca_k_every)} steps, "
-            f"final {int(variant.num_basis)}"
-        )
     print(
         f"SAC residual horizon = query_freq = {variant.query_freq} "
         f"(base policy action_horizon = {variant.pi0_action_horizon})"

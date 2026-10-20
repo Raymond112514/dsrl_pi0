@@ -25,7 +25,6 @@ class MLPAutoencoder(nn.Module):
     latent_dim: int
     hidden_dims: Sequence[int] = (256, 256)
     vae: bool = False
-    cond_dim: int = 0
 
     def setup(self):
         enc_out = 2 * self.latent_dim if self.vae else self.latent_dim
@@ -34,24 +33,16 @@ class MLPAutoencoder(nn.Module):
             list(reversed(self.hidden_dims)) + [self.input_dim], activate_final=False
         )
 
-    def _concat_cond(self, x: jnp.ndarray, cond: Optional[jnp.ndarray]) -> jnp.ndarray:
-        if not self.cond_dim:
-            return x
-        if cond is None:
-            raise ValueError("State conditioning is enabled but no state was passed")
-        return jnp.concatenate([x, cond], axis=-1)
-
-    def decode(self, z: jnp.ndarray, cond: Optional[jnp.ndarray] = None) -> jnp.ndarray:
-        return self.decoder(self._concat_cond(z, cond))
+    def decode(self, z: jnp.ndarray) -> jnp.ndarray:
+        return self.decoder(z)
 
     def __call__(
         self,
         x: jnp.ndarray,
         latent_rng: Optional[jax.Array] = None,
         sample: bool = False,
-        cond: Optional[jnp.ndarray] = None,
     ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        h = self.encoder(self._concat_cond(x, cond))
+        h = self.encoder(x)
         if self.vae:
             mu, logvar = jnp.split(h, 2, axis=-1)
             logvar = jnp.clip(logvar, -20.0, 10.0)
@@ -64,7 +55,7 @@ class MLPAutoencoder(nn.Module):
             mu = h
             logvar = jnp.zeros_like(mu)
             z = mu
-        return self.decode(z, cond), mu, logvar
+        return self.decode(z), mu, logvar
 
 
 def decode_latents_jax(
@@ -75,26 +66,13 @@ def decode_latents_jax(
     input_dim: int,
     latent_dim: int,
     hidden_dims=(256, 256),
-    cond=None,
-    cond_dim: int = 0,
-    state_mean=None,
-    state_std=None,
 ):
-    """JAX decode for SAC updates: z -> unnormalized residual flat.
-
-    `cond_dim > 0` concatenates the normalized proprio vector onto z.
-    """
+    """JAX decode for SAC updates: z -> std * decoder(z) + mean."""
     module = MLPAutoencoder(
         input_dim=input_dim,
         latent_dim=latent_dim,
         hidden_dims=hidden_dims,
         vae=True,
-        cond_dim=int(cond_dim),
     )
-    if int(cond_dim) > 0:
-        cond = jnp.reshape(cond, (z.shape[0], int(cond_dim)))
-        cond = (cond - state_mean) / state_std
-        recon = module.apply({"params": params}, z, cond, method=module.decode)
-    else:
-        recon = module.apply({"params": params}, z, method=module.decode)
+    recon = module.apply({"params": params}, z, method=module.decode)
     return recon * std + mean

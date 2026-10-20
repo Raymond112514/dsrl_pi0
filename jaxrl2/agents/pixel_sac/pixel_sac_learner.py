@@ -41,8 +41,8 @@ class TrainState(train_state.TrainState):
 @functools.partial(jax.jit, static_argnames=(
     'critic_reduction', 'color_jitter', 'aug_next', 'num_cameras',
     'use_eigenbasis', 'use_vae', 'use_flow', 'q_on_full_actions',
-    'vae_input_dim', 'vae_latent_dim', 'vae_hidden_dims', 'vae_cond_dim',
-    'flow_dim', 'flow_hidden_dims', 'flow_steps', 'fit_residual',
+    'vae_input_dim', 'vae_latent_dim', 'vae_hidden_dims',
+    'flow_dim', 'flow_hidden_dims', 'flow_steps',
 ))
 def _update_jit(
     rng: PRNGKey, actor: TrainState, critic: TrainState,
@@ -58,9 +58,6 @@ def _update_jit(
     vae_input_dim: int = 0,
     vae_latent_dim: int = 0,
     vae_hidden_dims=(256, 256),
-    vae_cond_dim: int = 0,
-    vae_state_mean=None,
-    vae_state_std=None,
     use_flow: bool = False,
     flow_params=None,
     flow_mean=None,
@@ -68,8 +65,6 @@ def _update_jit(
     flow_dim: int = 0,
     flow_hidden_dims=(256, 256, 256),
     flow_steps: int = 10,
-    fit_residual: bool = True,
-    latent_mask=None,
 ) -> Tuple[PRNGKey, TrainState, TrainState, Params, TrainState, Dict[str,float]]:
     aug_pixels = batch['observations']['pixels']
     aug_next_pixels = batch['next_observations']['pixels']
@@ -119,9 +114,6 @@ def _update_jit(
         vae_input_dim=vae_input_dim,
         vae_latent_dim=vae_latent_dim,
         vae_hidden_dims=vae_hidden_dims,
-        vae_cond_dim=vae_cond_dim,
-        vae_state_mean=vae_state_mean,
-        vae_state_std=vae_state_std,
         use_flow=use_flow,
         flow_params=flow_params,
         flow_mean=flow_mean,
@@ -129,8 +121,6 @@ def _update_jit(
         flow_dim=flow_dim,
         flow_hidden_dims=flow_hidden_dims,
         flow_steps=flow_steps,
-        fit_residual=fit_residual,
-        latent_mask=latent_mask,
     )
     new_target_critic_params = soft_target_update(new_critic.params, target_critic_params, tau)
     
@@ -148,9 +138,6 @@ def _update_jit(
         vae_input_dim=vae_input_dim,
         vae_latent_dim=vae_latent_dim,
         vae_hidden_dims=vae_hidden_dims,
-        vae_cond_dim=vae_cond_dim,
-        vae_state_mean=vae_state_mean,
-        vae_state_std=vae_state_std,
         use_flow=use_flow,
         flow_params=flow_params,
         flow_mean=flow_mean,
@@ -158,8 +145,6 @@ def _update_jit(
         flow_dim=flow_dim,
         flow_hidden_dims=flow_hidden_dims,
         flow_steps=flow_steps,
-        fit_residual=fit_residual,
-        latent_mask=latent_mask,
     )
     new_temp, alpha_info = update_temperature(temp, actor_info['entropy'], target_entropy)
 
@@ -233,19 +218,12 @@ class PixelSACLearner(Agent):
         self.vae_input_dim = int(self.critic_action_dim)
         self.vae_latent_dim = int(self.action_dim)
         self.vae_hidden_dims = (256, 256)
-        self.vae_cond_dim = 0
-        self.vae_state_mean = jnp.zeros((1,), dtype=jnp.float32)
-        self.vae_state_std = jnp.ones((1,), dtype=jnp.float32)
         self.flow_params = None
         self.flow_mean = jnp.zeros((self.action_dim,), dtype=jnp.float32)
         self.flow_std = jnp.ones((self.action_dim,), dtype=jnp.float32)
         self.flow_dim = int(self.action_dim) if self.use_flow else 0
         self.flow_hidden_dims = (256, 256, 256)
         self.flow_steps = 10
-        self.fit_residual = True
-        # 1 on live PCA coordinates. Shape stays K so the update jit does not recompile.
-        self.latent_mask = jnp.ones((self.action_dim,), dtype=jnp.float32)
-        self._pca_k_live = int(self.action_dim)
 
         self.tau = tau
         self.discount = discount
@@ -353,43 +331,20 @@ class PixelSACLearner(Agent):
                 f'Q trained on full actions (actor_dim={self.action_dim}, '
                 f'critic_dim={self.critic_action_dim}, residual_scale={self.residual_scale}, '
                 f'use_eigenbasis={self.use_eigenbasis}, use_vae={self.use_vae}, '
-                f'use_flow={self.use_flow}, fit_residual={self.fit_residual})'
+                f'use_flow={self.use_flow})'
             )
 
     def set_residual_basis(self, V):
         self.basis_V = jnp.asarray(V, dtype=jnp.float32)
 
-    def set_pca_latent_k(self, k: int) -> bool:
-        """Decode only the first k PCA coefficients. Returns True when k changes."""
-        k = int(k)
-        if k < 1 or k > int(self.action_dim):
-            raise ValueError(f"pca k must be in [1, {int(self.action_dim)}], got {k}")
-        if k == self._pca_k_live:
-            return False
-        self.latent_mask = jnp.zeros((self.action_dim,), dtype=jnp.float32).at[:k].set(1.0)
-        self._pca_k_live = k
-        return True
-
     def set_residual_vae(self, residual_vae):
         self.use_vae = True
         self.vae_params = residual_vae.params
-        vae_mean = residual_vae.mean
-        if not getattr(residual_vae, "decode_add_mean", True):
-            vae_mean = np.zeros_like(residual_vae.mean)
-        self.vae_mean = jnp.asarray(vae_mean, dtype=jnp.float32)
+        self.vae_mean = jnp.asarray(residual_vae.mean, dtype=jnp.float32)
         self.vae_std = jnp.asarray(residual_vae.std, dtype=jnp.float32)
         self.vae_input_dim = int(residual_vae.feature_dim)
         self.vae_latent_dim = int(residual_vae.latent_dim)
         self.vae_hidden_dims = tuple(residual_vae.hidden_dims)
-        self.fit_residual = bool(getattr(residual_vae, "fit_residual", True))
-        cond_dim = int(getattr(residual_vae, "cond_dim", 0))
-        self.vae_cond_dim = cond_dim
-        if cond_dim:
-            self.vae_state_mean = jnp.asarray(residual_vae.state_mean, dtype=jnp.float32).reshape(-1)
-            self.vae_state_std = jnp.asarray(residual_vae.state_std, dtype=jnp.float32).reshape(-1)
-        else:
-            self.vae_state_mean = jnp.zeros((1,), dtype=jnp.float32)
-            self.vae_state_std = jnp.ones((1,), dtype=jnp.float32)
 
     def set_residual_flow(self, residual_flow):
         if int(residual_flow.latent_dim) != int(self.action_dim):
@@ -400,15 +355,11 @@ class PixelSACLearner(Agent):
         self.flow_params = jax.tree_util.tree_map(
             lambda x: jnp.asarray(x), residual_flow.params
         )
-        flow_mean = residual_flow.mean
-        if not getattr(residual_flow, "decode_add_mean", True):
-            flow_mean = np.zeros_like(residual_flow.mean)
-        self.flow_mean = jnp.asarray(flow_mean, dtype=jnp.float32)
+        self.flow_mean = jnp.asarray(residual_flow.mean, dtype=jnp.float32)
         self.flow_std = jnp.asarray(residual_flow.std, dtype=jnp.float32)
         self.flow_dim = int(residual_flow.feature_dim)
         self.flow_hidden_dims = tuple(residual_flow.hidden_dims)
         self.flow_steps = int(residual_flow.n_steps)
-        self.fit_residual = bool(getattr(residual_flow, "fit_residual", True))
 
     def update(self, batch: FrozenDict) -> Dict[str, float]:
         new_rng, new_actor, new_critic, new_target_critic, new_temp, info = _update_jit(
@@ -416,11 +367,8 @@ class PixelSACLearner(Agent):
             self.residual_scale, self.basis_V, self.use_eigenbasis, self.q_on_full_actions,
             self.use_vae, self.vae_params, self.vae_mean, self.vae_std,
             self.vae_input_dim, self.vae_latent_dim, self.vae_hidden_dims,
-            self.vae_cond_dim, self.vae_state_mean, self.vae_state_std,
             self.use_flow, self.flow_params, self.flow_mean, self.flow_std,
             self.flow_dim, self.flow_hidden_dims, self.flow_steps,
-            self.fit_residual,
-            self.latent_mask if self.use_eigenbasis else None,
             )
 
         self._rng = new_rng

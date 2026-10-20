@@ -1,8 +1,7 @@
-"""Flow-matching on action chunks.
+"""Flow-matching on pairwise action-chunk differences.
 
-fit_residual=True (default) fits pairwise differences δ = a - a'.
-fit_residual=False fits the action chunks.
-Execution is always a_base + λ (std * ODE(z) + μ).
+Fits δ = a - a'. Training uses (δ - mean) / std.
+Execution is a_base + λ (std * ODE(z) + mean).
 """
 
 from __future__ import annotations
@@ -39,8 +38,6 @@ class ResidualFlow:
     action_dim: int
     hidden_dims: tuple = (256, 256, 256)
     n_steps: int = 10
-    fit_residual: bool = True
-    decode_add_mean: bool = True
     fit_metrics: Optional[Dict[str, float]] = None
 
     @property
@@ -63,7 +60,7 @@ class ResidualFlow:
         )
 
     def decode_latents(self, z) -> np.ndarray:
-        """Map noise z to a flat residual: std * ODE(z), plus μ unless disabled."""
+        """Map noise z to a flat residual: std * ODE(z) + mean."""
         z = np.asarray(z, dtype=np.float32)
         single = z.ndim == 1
         if single:
@@ -71,9 +68,7 @@ class ResidualFlow:
         module = self._module()
         recon = module.apply({"params": self.params}, z, method=module.decode)
         recon = np.asarray(recon, dtype=np.float32)
-        out = recon * self.std[None, :]
-        if self.decode_add_mean:
-            out = out + self.mean[None, :]
+        out = recon * self.std[None, :] + self.mean[None, :]
         return out[0] if single else out
 
     def latent_to_chunk(self, z, scale: float = 1.0) -> np.ndarray:
@@ -102,8 +97,8 @@ class ResidualFlow:
                     "action_dim": self.action_dim,
                     "hidden_dims": self.hidden_dims,
                     "n_steps": self.n_steps,
-                    "fit_residual": self.fit_residual,
-                    "decode_add_mean": self.decode_add_mean,
+                    "fit_residual": True,
+                    "decode_add_mean": True,
                     "fit_metrics": self.fit_metrics,
                 },
                 f,
@@ -115,8 +110,8 @@ class ResidualFlow:
             "hidden_dims": list(self.hidden_dims),
             "n_steps": int(self.n_steps),
             "feature_dim": self.feature_dim,
-            "fit_residual": self.fit_residual,
-            "decode_add_mean": self.decode_add_mean,
+            "fit_residual": True,
+            "decode_add_mean": True,
             "fit_metrics": self.fit_metrics,
             "kind": "flow",
         }
@@ -127,6 +122,10 @@ class ResidualFlow:
         path = Path(path)
         with open(path, "rb") as f:
             data = pickle.load(f)
+        if not _loaded_fit_residual(data):
+            raise ValueError(f"{path} was fit on action chunks, not pairwise differences")
+        if not bool(data.get("decode_add_mean", True)):
+            raise ValueError(f"{path} was saved with the mean dropped at decode")
         return cls(
             params=data["params"],
             mean=np.asarray(data["mean"], dtype=np.float32),
@@ -135,8 +134,6 @@ class ResidualFlow:
             action_dim=int(data["action_dim"]),
             hidden_dims=tuple(data.get("hidden_dims", (256, 256, 256))),
             n_steps=int(data.get("n_steps", 10)),
-            fit_residual=_loaded_fit_residual(data),
-            decode_add_mean=bool(data.get("decode_add_mean", True)),
             fit_metrics=data.get("fit_metrics"),
         )
 
@@ -155,9 +152,8 @@ def fit_residual_flow(
     n_steps: int = 10,
     seed: int = 0,
     normalize: bool = True,
-    fit_residual: bool = True,
 ) -> ResidualFlow:
-    """Fit OT-CFM on residuals (`fit_residual=True`) or action chunks."""
+    """Fit OT-CFM on pairwise differences δ = a - a'."""
     chunks = np.asarray(chunks, dtype=np.float32)
     if chunks.ndim != 2:
         raise ValueError(f"Expected (N, D) chunks, got {chunks.shape}")
@@ -170,7 +166,6 @@ def fit_residual_flow(
     rng_np = np.random.default_rng(seed)
     train, val, split_info = prepare_fit_arrays(
         chunks,
-        fit_residual=fit_residual,
         pairs_per_chunk=pairs_per_chunk,
         batch_size=batch_size,
         val_frac=val_frac,
@@ -276,7 +271,7 @@ def fit_residual_flow(
             last_val = {}
 
         if epoch == 1 or epoch == epochs or epoch % max(1, epochs // 5) == 0:
-            tag = "residual_flow" if split_info["fit_residual"] else "action_flow"
+            tag = "residual_flow"
             print(
                 f"[{tag}] epoch {epoch}/{epochs}  "
                 f"train_loss={last_train.get('loss', float('nan')):.5f}  "
@@ -307,6 +302,5 @@ def fit_residual_flow(
         action_dim=int(action_dim),
         hidden_dims=hidden,
         n_steps=n_steps,
-        fit_residual=bool(split_info["fit_residual"]),
         fit_metrics=fit_metrics,
     )
