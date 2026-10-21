@@ -39,6 +39,6 @@ python3 examples/launch_train_sim.py \
   --hidden_dims 128 \
   --output_dir "${EXP}" \
   --task_id 44 \
-  --use_eigenbasis \
-  --num_basis 8 \
+  --latent pca \
+  --pca_k 8 \
   --warmup_rollouts 20

@@ -5,9 +5,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))              # for `examples.*`
 sys.path.insert(0, str(REPO_ROOT / "LIBERO")) 
 
-import sys
 from examples.train_sim import main
 from jaxrl2.utils.launch_util import parse_training_args
+import latent_rl
 
 
 if __name__ == '__main__':
@@ -50,35 +50,8 @@ if __name__ == '__main__':
         action='store_true',
         help='Apply SAC residual during rollout collection from the first trajectory',
     )
-    parser.add_argument(
-        '--use_eigenbasis',
-        action='store_true',
-        help='Train SAC in K-dim PCA coefficient space (a = a_base + lambda * V @ c)',
-    )
-    parser.add_argument('--num_basis', default=8, type=int, help='Number of PCA components / VAE latent dim.')
-    parser.add_argument('--warmup_rollouts', default=20, type=int, help='Rollouts before PCA/VAE fit and SAC updates')
-    parser.add_argument('--basis_path', default='', help='Optional pre-fit residual_basis.npz (skips online PCA)')
-    parser.add_argument(
-        '--use_vae',
-        action='store_true',
-        help='Train SAC in K-dim VAE latent space. The VAE is fit on pairwise chunk diffs. Execution is a_base + lambda * (std * D(z) + mean).',
-    )
-    parser.add_argument('--vae_beta', type=float, default=1e-3, help='KL weight β for residual VAE')
-    parser.add_argument('--vae_epochs', type=int, default=100, help='Epochs to train residual VAE on warmup diffs')
-    parser.add_argument('--vae_path', default='', help='Optional pre-fit residual_vae.pkl (skips online VAE fit)')
-    parser.add_argument(
-        '--use_flow',
-        action='store_true',
-        help=(
-            'Train SAC on full-dim flow-matching noise. '
-            'The flow is fit on pairwise chunk diffs. '
-            'Executed action is a_base + lambda * (std * ODE(ε) + mean). '
-            'Latent dim = query_freq * action_dim.'
-        ),
-    )
-    parser.add_argument('--flow_epochs', type=int, default=100, help='Epochs to train residual flow on warmup diffs')
-    parser.add_argument('--flow_steps', type=int, default=10, help='Euler steps when decoding flow noise to a residual')
-    parser.add_argument('--flow_path', default='', help='Optional pre-fit residual_flow.pkl (skips online flow fit)')
+    parser.add_argument('--warmup_rollouts', default=20, type=int, help='Rollouts before latent fit and SAC updates')
+    latent_rl.add_args(parser)
 
     train_args_dict = dict(
         actor_lr=1e-4,
@@ -106,7 +79,7 @@ if __name__ == '__main__':
         )
 
     variant, args = parse_training_args(train_args_dict, parser)
+    latent_rl.nest(variant)
     print(variant)
     main(variant)
     sys.exit()
-    

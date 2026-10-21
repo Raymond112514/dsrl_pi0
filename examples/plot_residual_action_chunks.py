@@ -138,9 +138,6 @@ def _make_agent(kind: str):
         zero_init_actor_mean=True,
         critic_actions=add_batch_dim(full_action_space.sample()),
         residual_scale=RESIDUAL_SCALE,
-        use_eigenbasis=kind == "pca",
-        use_vae=kind == "vae",
-        use_flow=kind == "flow",
         q_on_full_actions=True,
     )
     return agent
@@ -159,17 +156,17 @@ def _restore(agent, ckpt_dir: Path, step: int | None):
 
 def _load_basis(kind: str, run_dir: Path):
     if kind == "pca":
-        from examples.residual_basis import ResidualActionBasis
+        from latent_rl.pca import PCALatentModel
 
-        return ResidualActionBasis.load(run_dir / "residual_basis.npz")
+        return PCALatentModel.load(str(run_dir / "residual_basis.npz"))
     if kind == "vae":
-        from examples.residual_vae import ResidualVAE
+        from latent_rl.vae import VAELatentModel
 
-        return ResidualVAE.load(run_dir / "residual_vae.pkl")
+        return VAELatentModel.load(str(run_dir / "residual_vae.pkl"))
     if kind == "flow":
-        from examples.residual_flow import ResidualFlow
+        from latent_rl.flow import FlowLatentModel
 
-        return ResidualFlow.load(run_dir / "residual_flow.pkl")
+        return FlowLatentModel.load(str(run_dir / "residual_flow.pkl"))
     return None
 
 
@@ -197,9 +194,7 @@ def _decode(kind: str, latent: np.ndarray, basis) -> np.ndarray:
     flat = np.asarray(latent, dtype=np.float32).reshape(-1)
     if kind == "baseline":
         return flat.reshape(QUERY_FREQ, ACTION_DIM)
-    if kind == "pca":
-        return np.asarray(basis.coeffs_to_chunk(flat, scale=1.0), dtype=np.float32)
-    return np.asarray(basis.latent_to_chunk(flat, scale=1.0), dtype=np.float32)
+    return np.asarray(basis.decode(flat), dtype=np.float32)
 
 
 def _sample_residual(agent, obs_dict) -> np.ndarray:

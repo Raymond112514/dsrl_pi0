@@ -37,7 +37,7 @@ def _import_models() -> None:
         return
     package = importlib.import_module(__name__)
     for mod in pkgutil.iter_modules(package.__path__):
-        if mod.name == "base":
+        if mod.name in ("base", "dataset"):
             continue
         importlib.import_module(f"{__name__}.{mod.name}")
     _models_imported = True
@@ -101,6 +101,10 @@ def build(variant: Any) -> Optional[LatentModel]:
     hparams = getattr(variant, kind)
     path = str(getattr(hparams, "path", "") or "")
     if path:
+        from pathlib import Path
+
+        if not Path(path).is_file():
+            raise FileNotFoundError(f"--{kind}_path file not found: {path}")
         model = cls.load(path)
     else:
         model = cls(hparams, seed=int(getattr(variant, "seed", 0)))

@@ -5,12 +5,6 @@ xla_flags = os.environ.get('XLA_FLAGS', '')
 xla_flags += ' --xla_gpu_triton_gemm_any=True'
 os.environ['XLA_FLAGS'] = xla_flags
 
-# import sys
-# sys.path.append('/global/home/users/r112358/dsrl_pi0')
-# sys.path.append('/global/home/users/r112358/LIBERO')
-# sys.path.append('/global/home/users/r112358/dsrl_pi0/openpi')
-# sys.path.append('/global/home/users/r112358/dsrl_pi0/openpi/src')
-
 import pathlib, copy
 import time
 import jax
@@ -32,9 +26,7 @@ import tempfile
 from functools import partial
 from examples.train_utils_sim import (
     trajwise_alternating_training_loop,
-    log_basis_explained_variance,
-    log_vae_fit_metrics,
-    log_flow_fit_metrics,
+    log_latent_fit_metrics,
 )
 import tensorflow as tf
 from jax.experimental.compilation_cache import compilation_cache
@@ -42,6 +34,8 @@ from jax.experimental.compilation_cache import compilation_cache
 from openpi.training import config as openpi_config
 from openpi.policies import policy_config
 from openpi.shared import download
+
+import latent_rl
 
 home_dir = os.environ['HOME']
 compilation_cache.initialize_cache(os.path.join(home_dir, 'jax_compilation_cache'))
@@ -88,12 +82,8 @@ class DummyEnv(gym.ObservationWrapper):
             obs_dict['action_diffusion'] = Box(
                 low=-np.inf, high=np.inf, shape=(residual_dim, 1), dtype=np.float32
             )
-            if getattr(variant, 'use_flow', False):
-                # Flow matching does not compress: SAC noise has the chunk dim.
-                sac_dim = residual_dim
-            elif getattr(variant, 'use_eigenbasis', False) or getattr(variant, 'use_vae', False):
-                sac_dim = variant.num_basis
-            else:
+            sac_dim = latent_rl.action_dim(variant)
+            if sac_dim is None:
                 sac_dim = residual_dim
             self.action_space = Box(low=-1, high=1, shape=(1, sac_dim), dtype=np.float32)
             self.full_action_space = Box(low=-1, high=1, shape=(1, residual_dim), dtype=np.float32)
@@ -108,13 +98,12 @@ def build_exp_name(variant):
     else:
         parts = [variant.env]
     parts.append(f"qf{variant.query_freq}")
-    if getattr(variant, 'use_eigenbasis', False):
-        parts.append(f"K{variant.num_basis}")
-    if getattr(variant, 'use_vae', False):
-        parts.append(f"vaeK{variant.num_basis}")
-        parts.append(f"beta{getattr(variant, 'vae_beta', 1e-3)}")
-    if getattr(variant, 'use_flow', False):
-        parts.append(f"flow{getattr(variant, 'flow_steps', 10)}")
+    kind = getattr(variant, "latent", "none")
+    if kind and kind != "none":
+        parts.append(str(kind))
+        sac_dim = latent_rl.action_dim(variant)
+        if sac_dim is not None:
+            parts.append(f"K{sac_dim}")
     return "_".join(parts)
 
 
@@ -130,40 +119,6 @@ def resolve_pi0_checkpoint(variant, default_url):
     print(f"OpenPI checkpoint not found locally; downloading to {scratch}")
     return str(download.maybe_download(default_url))
 
-
-def load_basis_if_provided(variant):
-    if not getattr(variant, 'use_eigenbasis', False):
-        return None
-    basis_path = variant.get('basis_path', '')
-    if basis_path and os.path.isfile(basis_path):
-        from examples.residual_basis import ResidualActionBasis
-        print(f"Loading PCA basis from {basis_path}")
-        return ResidualActionBasis.load(basis_path)
-    return None
-
-
-def load_vae_if_provided(variant):
-    if not getattr(variant, 'use_vae', False):
-        return None
-    vae_path = variant.get('vae_path', '') or variant.get('basis_path', '')
-    if vae_path and os.path.isfile(vae_path):
-        from examples.residual_vae import ResidualVAE
-        print(f"Loading residual VAE from {vae_path}")
-        model = ResidualVAE.load(vae_path)
-        return model
-    return None
-
-
-def load_flow_if_provided(variant):
-    if not getattr(variant, 'use_flow', False):
-        return None
-    flow_path = variant.get('flow_path', '')
-    if flow_path and os.path.isfile(flow_path):
-        from examples.residual_flow import ResidualFlow
-        print(f"Loading residual flow from {flow_path}")
-        model = ResidualFlow.load(flow_path)
-        return model
-    return None
 
 def main(variant):
     devices = jax.local_devices()
@@ -259,15 +214,6 @@ def main(variant):
         variant.env_action_dim = 14
     if not hasattr(variant, 'residual_scale') or variant.residual_scale is None:
         variant.residual_scale = 0.01
-    latent_modes = [
-        name for name, flag in (
-            ('--use_eigenbasis', getattr(variant, 'use_eigenbasis', False)),
-            ('--use_vae', getattr(variant, 'use_vae', False)),
-            ('--use_flow', getattr(variant, 'use_flow', False)),
-        ) if flag
-    ]
-    if len(latent_modes) > 1:
-        raise ValueError(f"{' and '.join(latent_modes)} are mutually exclusive")
     print(
         f"SAC residual horizon = query_freq = {variant.query_freq} "
         f"(base policy action_horizon = {variant.pi0_action_horizon})"
@@ -305,9 +251,6 @@ def main(variant):
         zero_init_actor_mean=variant.env in ('libero', 'aloha_cube', 'aloha_insertion'),
         critic_actions=sample_full_action,
         residual_scale=getattr(variant, 'residual_scale', 1.0),
-        use_eigenbasis=getattr(variant, 'use_eigenbasis', False),
-        use_vae=getattr(variant, 'use_vae', False),
-        use_flow=getattr(variant, 'use_flow', False),
         q_on_full_actions=q_on_full_actions,
         **kwargs,
     )
@@ -316,20 +259,11 @@ def main(variant):
     online_replay_buffer = ReplayBuffer(dummy_env.observation_space, dummy_env.full_action_space, int(online_buffer_size))
     replay_buffer = online_replay_buffer
     replay_buffer.seed(variant.seed)
-    if getattr(variant, 'use_vae', False):
-        variant.basis = load_vae_if_provided(variant)
-        if variant.basis is not None:
-            agent.set_residual_vae(variant.basis)
-            log_vae_fit_metrics(wandb_logger, variant.basis, step=0)
-    elif getattr(variant, 'use_flow', False):
-        variant.basis = load_flow_if_provided(variant)
-        if variant.basis is not None:
-            agent.set_residual_flow(variant.basis)
-            log_flow_fit_metrics(wandb_logger, variant.basis, step=0)
-    else:
-        variant.basis = load_basis_if_provided(variant)
-        if variant.basis is not None:
-            agent.set_residual_basis(variant.basis.V)
-            log_basis_explained_variance(wandb_logger, variant.basis, step=0)
+
+    model = latent_rl.build(variant)
+    variant.latent_model = model
+    if model is not None and model.fitted:
+        agent.set_latent_model(model)
+        log_latent_fit_metrics(wandb_logger, model, step=0)
+
     trajwise_alternating_training_loop(variant, agent, env, eval_env, online_replay_buffer, replay_buffer, wandb_logger, shard_fn=shard_fn, agent_dp=agent_dp)
- 

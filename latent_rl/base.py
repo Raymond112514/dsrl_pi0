@@ -57,6 +57,10 @@ class LatentModel(ABC):
         the (T, A) reshape, including the mean for VAE and flow.
         """
 
+    def make_jax_decoder(self):
+        """Return a pure JAX decode(z) for the SAC updater."""
+        return self.jax_decode
+
     @abstractmethod
     def save(self, output_dir: str) -> str:
         """Write this model's checkpoint under ``output_dir``. Return the path."""

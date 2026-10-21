@@ -111,7 +111,7 @@ def _executed_base_chunk(a_base, variant):
     return chunk[:query_freq]
 
 
-def compute_action_chunk(variant, agent, agent_dp, rng, obs_pi_zero, obs_dict, *, use_residual, basis=None):
+def compute_action_chunk(variant, agent, agent_dp, rng, obs_pi_zero, obs_dict, *, use_residual, model=None):
     rng, key = jax.random.split(rng)
     noise = jax.random.normal(key, (1, variant.pi0_action_horizon, variant.pi0_action_dim))
     a_base = agent_dp.infer(obs_pi_zero, noise=noise)["actions"]
@@ -126,25 +126,15 @@ def compute_action_chunk(variant, agent, agent_dp, rng, obs_pi_zero, obs_dict, *
     def _full_action(action_chunk):
         return np.asarray(action_chunk, dtype=np.float32).reshape(1, -1)
 
-    if (
-        getattr(variant, 'use_eigenbasis', False)
-        or getattr(variant, 'use_vae', False)
-        or getattr(variant, 'use_flow', False)
-    ):
-        if use_residual and basis is not None:
+    if model is not None:
+        if use_residual and model.fitted:
             latents = agent.sample_actions(obs_dict)
             if latents.ndim == 1:
                 latents = latents.reshape(1, -1)
-            if getattr(variant, 'use_vae', False):
-                res_chunk = basis.latent_to_chunk(latents[0], variant.residual_scale)
-                actions = a_exec + res_chunk
-            elif getattr(variant, 'use_flow', False):
-                res_chunk = basis.latent_to_chunk(latents[0], variant.residual_scale)
-                actions = a_exec + res_chunk
-            else:
-                coeffs = np.asarray(latents, dtype=np.float32).reshape(-1)
-                res_chunk = basis.coeffs_to_chunk(coeffs, variant.residual_scale)
-                actions = a_exec + res_chunk
+            res_chunk = (
+                variant.residual_scale * model.decode(latents[0])
+            ).astype(np.float32)
+            actions = a_exec + res_chunk
         else:
             actions = a_exec
         return rng, actions, _full_action(actions), obs_dict
@@ -157,123 +147,17 @@ def compute_action_chunk(variant, agent, agent_dp, rng, obs_pi_zero, obs_dict, *
     return rng, actions, _full_action(actions), obs_dict
 
 
-def uses_latent_residual(variant):
-    return (
-        getattr(variant, 'use_eigenbasis', False)
-        or getattr(variant, 'use_vae', False)
-        or getattr(variant, 'use_flow', False)
-    )
-
-
-def log_basis_explained_variance(wandb_logger, basis, step=0):
-    if basis.explained_variance_ratio is None:
+def log_latent_fit_metrics(wandb_logger, model, step=0):
+    if model is None or not hasattr(model, "fit_metrics"):
         return
-    explained = np.asarray(basis.explained_variance_ratio, dtype=np.float64)
-    metrics = {
-        'basis/num_components': basis.num_basis,
-        'basis/total_explained_variance': float(explained.sum()),
-    }
-    for idx, ratio in enumerate(explained):
-        metrics[f'basis/pc_{idx}_explained_variance'] = float(ratio)
-    wandb_logger.log(metrics, step=step)
-    per_pc = ', '.join(f'PC{i}={explained[i]:.4f}' for i in range(len(explained)))
-    print_green(f'Basis explained variance: total={explained.sum():.4f} ({per_pc})')
+    metrics = model.fit_metrics()
+    if not metrics:
+        return
+    prefix = getattr(model, "name", "latent") or "latent"
+    log = {f"{prefix}/{k}": float(v) for k, v in metrics.items()}
+    wandb_logger.log(log, step=step)
+    print_green(f"{prefix} fit: " + "  ".join(f"{k}={v}" for k, v in list(metrics.items())[:6]))
 
-
-def log_vae_fit_metrics(wandb_logger, residual_vae, step=0):
-    metrics = residual_vae.fit_metrics or {}
-    log = {f'vae/{k}': float(v) for k, v in metrics.items()}
-    log['vae/latent_dim'] = float(residual_vae.latent_dim)
-    log['vae/feature_dim'] = float(residual_vae.feature_dim)
-    if log:
-        wandb_logger.log(log, step=step)
-    print_green(
-        f"VAE fit: latent_dim={residual_vae.latent_dim}  "
-        f"val_recon={metrics.get('val_recon_loss', float('nan')):.5f}  "
-        f"val_kl={metrics.get('val_kl', float('nan')):.4f}  "
-        f"val_ev={metrics.get('val_explained_var', float('nan')):.4f}"
-    )
-
-
-def fit_basis_from_warmup_chunks(variant, warmup_chunks):
-    from examples.residual_basis import ResidualActionBasis
-
-    action_dim = 7 if variant.env == 'libero' else 14
-    basis = ResidualActionBasis.fit_top_k(
-        np.stack(warmup_chunks, axis=0),
-        variant.num_basis,
-        query_freq=variant.query_freq,
-        action_dim=action_dim,
-    )
-    save_path = os.path.join(variant.outputdir, "residual_basis.npz")
-    basis.save(save_path)
-    print_green(
-        f"Fitted {basis.num_basis} PCs on {len(warmup_chunks)} chunks from "
-        f"{variant.warmup_rollouts} warmup trajectories"
-    )
-    return basis
-
-
-def log_flow_fit_metrics(wandb_logger, residual_flow, step=0):
-    metrics = residual_flow.fit_metrics or {}
-    log = {f'flow/{k}': float(v) for k, v in metrics.items()}
-    log['flow/latent_dim'] = float(residual_flow.latent_dim)
-    log['flow/n_steps'] = float(residual_flow.n_steps)
-    if log:
-        wandb_logger.log(log, step=step)
-    print_green(
-        f"Flow fit: latent_dim={residual_flow.latent_dim}  "
-        f"ode_steps={residual_flow.n_steps}  "
-        f"val_loss={metrics.get('val_loss', float('nan')):.5f}  "
-        f"val_recon={metrics.get('val_recon_loss', float('nan')):.5f}  "
-        f"val_ev={metrics.get('val_explained_var', float('nan')):.4f}"
-    )
-
-
-def fit_flow_from_warmup_chunks(variant, warmup_chunks):
-    from examples.residual_flow import fit_residual_flow
-
-    action_dim = 7 if variant.env == 'libero' else 14
-    residual_flow = fit_residual_flow(
-        np.stack(warmup_chunks, axis=0),
-        query_freq=variant.query_freq,
-        action_dim=action_dim,
-        epochs=getattr(variant, 'flow_epochs', 100),
-        n_steps=getattr(variant, 'flow_steps', 10),
-        seed=getattr(variant, 'seed', 0),
-    )
-    save_path = os.path.join(variant.outputdir, "residual_flow.pkl")
-    residual_flow.save(save_path)
-    print_green(
-        f"Fitted flow (D={residual_flow.latent_dim}, "
-        f"ode_steps={residual_flow.n_steps}, epochs={getattr(variant, 'flow_epochs', 100)}) "
-        f"on {len(warmup_chunks)} chunks from {variant.warmup_rollouts} warmup trajectories"
-    )
-    return residual_flow
-
-
-def fit_vae_from_warmup_chunks(variant, warmup_chunks):
-    from examples.residual_vae import fit_residual_vae
-
-    action_dim = 7 if variant.env == 'libero' else 14
-    residual_vae = fit_residual_vae(
-        np.stack(warmup_chunks, axis=0),
-        latent_dim=variant.num_basis,
-        query_freq=variant.query_freq,
-        action_dim=action_dim,
-        beta=getattr(variant, 'vae_beta', 1e-3),
-        epochs=getattr(variant, 'vae_epochs', 100),
-        seed=getattr(variant, 'seed', 0),
-    )
-    save_path = os.path.join(variant.outputdir, "residual_vae.pkl")
-    residual_vae.save(save_path)
-    print_green(
-        f"Fitted VAE (K={residual_vae.latent_dim}, beta={getattr(variant, 'vae_beta', 1e-3)}, "
-        f"epochs={getattr(variant, 'vae_epochs', 100)}) "
-        f"on {len(warmup_chunks)} chunks from "
-        f"{variant.warmup_rollouts} warmup trajectories"
-    )
-    return residual_vae
 
 def should_use_residual(variant, i):
     if getattr(variant, 'collect_with_residual', False):
@@ -290,7 +174,7 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
     i = 0
     num_traj = 0
     warmup_rollouts = getattr(variant, 'warmup_rollouts', 20)
-    basis = getattr(variant, 'basis', None)
+    model = getattr(variant, 'latent_model', None)
     warmup_chunks = []
     wandb_logger.log({'num_online_samples': 0}, step=i)
     wandb_logger.log({'num_online_trajs': 0}, step=i)
@@ -298,11 +182,11 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
     
     with tqdm(total=variant.max_steps, initial=0) as pbar:
         while i <= variant.max_steps:
-            traj = collect_traj(variant, agent, env, i, agent_dp, basis=basis)
+            traj = collect_traj(variant, agent, env, i, agent_dp, model=model)
             num_traj += 1
             traj_id = online_replay_buffer._traj_counter
             add_online_data_to_buffer(variant, traj, online_replay_buffer)
-            if basis is None and uses_latent_residual(variant):
+            if model is not None and not model.fitted:
                 warmup_chunks.extend(traj.get('pi0_chunks', []))
             total_env_steps += traj['env_steps']
             print('online buffer timesteps length:', len(online_replay_buffer))
@@ -310,25 +194,19 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
             print('total env steps:', total_env_steps)
 
             if (
-                basis is None
-                and uses_latent_residual(variant)
+                model is not None
+                and not model.fitted
                 and num_traj >= warmup_rollouts
             ):
-                if getattr(variant, 'use_vae', False):
-                    basis = fit_vae_from_warmup_chunks(variant, warmup_chunks)
-                    variant.basis = basis
-                    agent.set_residual_vae(basis)
-                    log_vae_fit_metrics(wandb_logger, basis, step=i)
-                elif getattr(variant, 'use_flow', False):
-                    basis = fit_flow_from_warmup_chunks(variant, warmup_chunks)
-                    variant.basis = basis
-                    agent.set_residual_flow(basis)
-                    log_flow_fit_metrics(wandb_logger, basis, step=i)
-                else:
-                    basis = fit_basis_from_warmup_chunks(variant, warmup_chunks)
-                    variant.basis = basis
-                    agent.set_residual_basis(basis.V)
-                    log_basis_explained_variance(wandb_logger, basis, step=i)
+                model.fit(np.stack(warmup_chunks, axis=0))
+                model.save(variant.outputdir)
+                variant.latent_model = model
+                agent.set_latent_model(model)
+                log_latent_fit_metrics(wandb_logger, model, step=i)
+                print_green(
+                    f"Fitted latent model on {len(warmup_chunks)} chunks from "
+                    f"{warmup_rollouts} warmup trajectories"
+                )
             
             if variant.get("num_online_gradsteps_batch", -1) > 0:
                 num_gradsteps = variant.num_online_gradsteps_batch
@@ -341,7 +219,7 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
                     if i == 0:
                         print('performing evaluation for initial checkpoint')
                         if perform_control_evals:
-                            perform_control_eval(agent, eval_env, i, variant, wandb_logger, agent_dp, basis=basis)
+                            perform_control_eval(agent, eval_env, i, variant, wandb_logger, agent_dp, model=model)
                         if hasattr(agent, 'perform_eval'):
                             agent.perform_eval(variant, i, wandb_logger, replay_buffer, replay_buffer_iterator, eval_env)
 
@@ -372,7 +250,7 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
                         wandb_logger.log({'num_online_trajs': traj_id + 1}, step=i)
                         wandb_logger.log({'env_steps': total_env_steps}, step=i)
                         if perform_control_evals:
-                            perform_control_eval(agent, eval_env, i, variant, wandb_logger, agent_dp, basis=basis)
+                            perform_control_eval(agent, eval_env, i, variant, wandb_logger, agent_dp, model=model)
                         if hasattr(agent, 'perform_eval'):
                             agent.perform_eval(variant, i, wandb_logger, replay_buffer, replay_buffer_iterator, eval_env)
 
@@ -409,7 +287,7 @@ def add_online_data_to_buffer(variant, traj, online_replay_buffer):
         online_replay_buffer.insert(insert_dict)
     online_replay_buffer.increment_traj_counter()
 
-def collect_traj(variant, agent, env, i, agent_dp=None, basis=None):
+def collect_traj(variant, agent, env, i, agent_dp=None, model=None):
     query_frequency = variant.query_freq
     max_timesteps = variant.max_timesteps
     env_max_reward = variant.env_max_reward
@@ -448,15 +326,15 @@ def collect_traj(variant, agent, env, i, agent_dp=None, basis=None):
             rng, key = jax.random.split(rng)
             obs_pi_zero = obs_to_pi_zero_input(obs, variant)
             use_residual = should_use_residual(variant, i) and (
-                basis is not None or not uses_latent_residual(variant)
+                model is None or model.fitted
             )
             rng, actions, stored_action, obs_dict = compute_action_chunk(
                 variant, agent, agent_dp, rng, obs_pi_zero, obs_dict,
-                use_residual=use_residual, basis=basis,
+                use_residual=use_residual, model=model,
             )
             action_list.append(stored_action)
             obs_list.append(obs_dict)
-            if basis is None and uses_latent_residual(variant):
+            if model is not None and not model.fitted:
                 chunk = obs_dict['action_diffusion'].reshape(-1).astype(np.float64)
                 pi0_chunks.append(chunk)
      
@@ -483,7 +361,7 @@ def collect_traj(variant, agent, env, i, agent_dp=None, basis=None):
         obs_pi_zero = obs_to_pi_zero_input(obs, variant)
         _, _, _, obs_dict = compute_action_chunk(
             variant, agent, agent_dp, rng, obs_pi_zero, obs_dict,
-            use_residual=False, basis=basis,
+            use_residual=False, model=model,
         )
     obs_list.append(obs_dict)
     image_list.append(curr_image)
@@ -519,7 +397,7 @@ def collect_traj(variant, agent, env, i, agent_dp=None, basis=None):
         'pi0_chunks': pi0_chunks,
     }
 
-def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None, basis=None):
+def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None, model=None):
     query_frequency = variant.query_freq
     print('query frequency', query_frequency)
     max_timesteps = variant.max_timesteps
@@ -559,12 +437,10 @@ def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None, ba
                 assert agent_dp is not None
                 
                 obs_pi_zero = obs_to_pi_zero_input(obs, variant)
-                use_residual = i > 0 and (
-                    basis is not None or not uses_latent_residual(variant)
-                )
+                use_residual = i > 0 and (model is None or model.fitted)
                 rng, actions, _, obs_dict = compute_action_chunk(
                     variant, agent, agent_dp, rng, obs_pi_zero, obs_dict,
-                    use_residual=use_residual, basis=basis,
+                    use_residual=use_residual, model=model,
                 )
               
             action_t = actions[t % query_frequency]
