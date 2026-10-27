@@ -488,5 +488,5 @@ def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None, mo
 
 def make_multiple_value_reward_visulizations(agent, variant, i, replay_buffer, wandb_logger):
     trajs = replay_buffer.get_random_trajs(3)
-    images = agent.make_value_reward_visulization(variant, trajs, shaped_rewards=None)
+    images = agent.make_value_reward_visulization(variant, trajs)
     wandb_logger.log({'reward_value_images': wandb.Image(images)}, step=i)

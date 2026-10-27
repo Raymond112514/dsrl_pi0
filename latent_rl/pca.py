@@ -12,12 +12,21 @@ from typing import Any, Optional
 
 import jax.numpy as jnp
 import numpy as np
+from sklearn.decomposition import PCA
 
 from latent_rl import register
 from latent_rl.base import LatentModel, flat_chunks
-from utils.action_eigenspace import fit_action_basis
 
 _FILENAME = "residual_basis.npz"
+
+
+def fit_action_basis(data, n_components):
+    """Fit PCA on (N, D) actions. Returns V (D, k) and per-component variance."""
+    centered = data - data.mean(axis=0)
+    k = min(n_components, centered.shape[0], centered.shape[1])
+    pca = PCA(n_components=k)
+    pca.fit(centered)
+    return pca.components_.T, pca.explained_variance_ratio_
 
 
 @register("pca")
