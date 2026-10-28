@@ -21,7 +21,7 @@ if __name__ == '__main__':
     parser.add_argument('--eval_interval', default=5000, help='Eval interval.', type=int)
     parser.add_argument('--checkpoint_interval', default=-1, help='checkpoint interval.', type=int)
     parser.add_argument('--batch_size', default=16, help='Mini batch size.', type=int)
-    parser.add_argument('--max_steps', default=int(1e6), help='Number of training steps.', type=int)
+    parser.add_argument('--max_steps', default=int(1e6), help='Number of environment steps.', type=int)
     parser.add_argument('--add_states', default=1, help='whether to add low-dim states to the obervations', type=int)
     parser.add_argument('--wandb_project', default='dsrl_pi0', help='wandb project')
     parser.add_argument('--start_online_updates', default=1000, help='number of steps to collect before starting online updates', type=int)

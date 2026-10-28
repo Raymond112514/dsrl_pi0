@@ -26,7 +26,6 @@ import tempfile
 from functools import partial
 from examples.train_utils_sim import (
     trajwise_alternating_training_loop,
-    log_latent_fit_metrics,
 )
 import tensorflow as tf
 from jax.experimental.compilation_cache import compilation_cache
@@ -134,8 +133,7 @@ def main(variant):
     tf.config.set_visible_devices([], "GPU")
     
     kwargs = variant['train_kwargs']
-    if kwargs.pop('cosine_decay', False):
-        kwargs['decay_steps'] = variant.max_steps
+    use_cosine_decay = kwargs.pop('cosine_decay', False)
         
     if not variant.prefix:
         import uuid
@@ -184,6 +182,11 @@ def main(variant):
         raise NotImplementedError()
     if variant.query_freq <= 0:
         variant.query_freq = variant.pi0_action_horizon
+    if use_cosine_decay:
+        # The optimizer steps once per gradient update. One chunk is query_freq
+        # env steps and multi_grad_step updates.
+        chunks = max(1, variant.max_steps // variant.query_freq)
+        kwargs['decay_steps'] = chunks * variant.multi_grad_step
     if variant.query_freq > variant.pi0_action_horizon:
         raise ValueError(
             f"query_freq={variant.query_freq} exceeds base policy action_horizon="
@@ -234,7 +237,7 @@ def main(variant):
         **kwargs,
     )
 
-    online_buffer_size = variant.max_steps  // variant.multi_grad_step
+    online_buffer_size = max(1, (variant.max_steps + variant.query_freq - 1) // variant.query_freq)
     online_replay_buffer = ReplayBuffer(dummy_env.observation_space, dummy_env.full_action_space, int(online_buffer_size))
     replay_buffer = online_replay_buffer
     replay_buffer.seed(variant.seed)
@@ -243,6 +246,5 @@ def main(variant):
     variant.latent_model = model
     if model is not None and model.fitted:
         agent.set_latent_model(model)
-        log_latent_fit_metrics(wandb_logger, model, step=0)
 
     trajwise_alternating_training_loop(variant, agent, env, eval_env, online_replay_buffer, replay_buffer, wandb_logger, shard_fn=shard_fn, agent_dp=agent_dp)

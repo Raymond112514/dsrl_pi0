@@ -287,8 +287,10 @@ class PixelSACLearner(Agent):
         return info
 
     def perform_eval(self, variant, i, wandb_logger, eval_buffer, eval_buffer_iterator, eval_env):
+        import wandb
         from examples.train_utils_sim import make_multiple_value_reward_visulizations
-        make_multiple_value_reward_visulizations(self, variant, i, eval_buffer, wandb_logger)
+        images = make_multiple_value_reward_visulizations(self, variant, eval_buffer)
+        wandb_logger.log({'reward_value_images': wandb.Image(images)}, step=i)
 
     def make_value_reward_visulization(self, variant, trajs):
         num_traj = len(trajs['rewards'])

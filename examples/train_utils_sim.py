@@ -156,16 +156,46 @@ def compute_action_chunk(variant, agent, agent_dp, rng, obs_pi_zero, obs_dict, *
     return rng, actions, stored, obs_dict
 
 
-def log_latent_fit_metrics(wandb_logger, latent_model, step=0):
+def log_latent_fit_metrics(latent_model):
+    """Return fit metrics. The caller logs them on the environment-step clock."""
     if latent_model is None or not hasattr(latent_model, "fit_metrics"):
-        return
+        return {}
     metrics = latent_model.fit_metrics()
     if not metrics:
-        return
+        return {}
     prefix = getattr(latent_model, "name", "latent") or "latent"
-    log = {f"{prefix}/{k}": float(v) for k, v in metrics.items()}
-    wandb_logger.log(log, step=step)
     print_green(f"{prefix} fit: " + "  ".join(f"{k}={v}" for k, v in list(metrics.items())[:6]))
+    return {f"{prefix}/{k}": float(v) for k, v in metrics.items()}
+
+
+class _EnvStepLog:
+    """Holds a dictionary for all statistics for the current environment step.
+    Calls at the same step are merged into that one commit.
+    """
+
+    def __init__(self, wandb_logger):
+        self.wandb_logger = wandb_logger
+        self.committed = -1
+        self.step = None
+        self.pending = {}
+
+    def add(self, step, data):
+        if not data or step <= self.committed:
+            return
+        if self.step is not None and step < self.step:
+            return
+        if self.step is not None and step > self.step:
+            self.flush()
+        self.step = step
+        self.pending.update(data)
+
+    def flush(self):
+        if not self.pending or self.step is None or self.step <= self.committed:
+            self.pending = {}
+            return
+        self.wandb_logger.log(self.pending, step=self.step)
+        self.committed = self.step
+        self.pending = {}
 
 
 def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_replay_buffer, replay_buffer, wandb_logger,
@@ -174,28 +204,74 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
     if shard_fn is not None:
         replay_buffer_iterator = map(shard_fn, replay_buffer_iterator)
 
-    total_env_steps = 0
     i = 0
     num_traj = 0
     warmup_rollouts = getattr(variant, 'warmup_rollouts', 20)
     latent_model = getattr(variant, 'latent_model', None)
     warmup_chunks = []
-    wandb_logger.log({'num_online_samples': 0}, step=i)
-    wandb_logger.log({'num_online_trajs': 0}, step=i)
-    wandb_logger.log({'env_steps': 0}, step=i)
-    
+    logger = _EnvStepLog(wandb_logger)
+    clock = {'env_steps': 0, 'update': None}
+
+    def training_payload(update_info):
+        if update_info is None:
+            return {}
+        payload = {}
+        info = {k: jax.device_get(v) for k, v in update_info.items()}
+        for k, v in info.items():
+            if v.ndim == 0:
+                payload[f'training/{k}'] = float(v)
+            elif v.ndim <= 2:
+                payload[f'training/{k}'] = wandb.Histogram(np.asarray(v).flatten())
+        return payload
+
+    def log_at(step):
+        # Everything due at this environment step goes into one wandb commit.
+        payload = {}
+        if variant.log_interval > 0 and step % variant.log_interval == 0:
+            payload.update(training_payload(clock['update']))
+            payload['gradient_steps'] = i
+            payload['replay_buffer_size'] = len(online_replay_buffer)
+            payload['num_online_samples'] = len(online_replay_buffer)
+            payload['num_online_trajs'] = num_traj
+        if perform_control_evals and variant.eval_interval > 0 and step % variant.eval_interval == 0:
+            payload.update(perform_control_eval(
+                agent, eval_env, i, variant, agent_dp, latent_model=latent_model,
+            ))
+            if replay_buffer._traj_counter > 0 and hasattr(agent, 'perform_eval'):
+                images = make_multiple_value_reward_visulizations(agent, variant, replay_buffer)
+                payload['reward_value_images'] = wandb.Image(images)
+        if payload:
+            logger.add(step, payload)
+
+    if latent_model is not None and latent_model.fitted:
+        logger.add(0, log_latent_fit_metrics(latent_model))
+    log_at(0)
+    logger.flush()
+
     with tqdm(total=variant.max_steps, initial=0) as pbar:
-        while i <= variant.max_steps:
-            traj = collect_traj(variant, agent, env, i, agent_dp, latent_model=latent_model)
+        def on_env_step():
+            # We check whether we need to log or perform eval at each environment step.
+            clock['env_steps'] += 1
+            pbar.update(1)
+            log_at(clock['env_steps'])
+            return clock['env_steps'] < variant.max_steps
+
+        while clock['env_steps'] < variant.max_steps:
+            traj = collect_traj(
+                variant, agent, env, i, agent_dp,
+                latent_model=latent_model, on_env_step=on_env_step,
+            )
             num_traj += 1
-            traj_id = online_replay_buffer._traj_counter
             add_online_data_to_buffer(variant, traj, online_replay_buffer)
             if latent_model is not None and not latent_model.fitted:
                 warmup_chunks.extend(traj.get('pi0_chunks', []))
-            total_env_steps += traj['env_steps']
+            logger.add(clock['env_steps'], {
+                'episode_return (exploration)': traj['episode_return'],
+                'is_success (exploration)': int(traj['is_success']),
+            })
             print('online buffer timesteps length:', len(online_replay_buffer))
-            print('online buffer num traj:', traj_id + 1)
-            print('total env steps:', total_env_steps)
+            print('online buffer num traj:', num_traj)
+            print('total env steps:', clock['env_steps'])
 
             if (
                 latent_model is not None
@@ -206,59 +282,31 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
                 latent_model.save(variant.outputdir)
                 variant.latent_model = latent_model
                 agent.set_latent_model(latent_model)
-                log_latent_fit_metrics(wandb_logger, latent_model, step=i)
+                logger.add(clock['env_steps'], log_latent_fit_metrics(latent_model))
                 print_green(
                     f"Fitted latent model on {len(warmup_chunks)} chunks from "
                     f"{warmup_rollouts} warmup trajectories"
                 )
-            
+
             if variant.get("num_online_gradsteps_batch", -1) > 0:
                 num_gradsteps = variant.num_online_gradsteps_batch
             else:
-                num_gradsteps = len(traj["rewards"])*variant.multi_grad_step
+                num_gradsteps = len(traj["rewards"]) * variant.multi_grad_step
 
             if num_traj >= warmup_rollouts:
                 print_green(f"Updating time at {i}")
                 for _ in range(num_gradsteps):
-                    if i == 0:
-                        print('performing evaluation for initial checkpoint')
-                        if perform_control_evals:
-                            perform_control_eval(agent, eval_env, i, variant, wandb_logger, agent_dp, latent_model=latent_model)
-                        if hasattr(agent, 'perform_eval'):
-                            agent.perform_eval(variant, i, wandb_logger, replay_buffer, replay_buffer_iterator, eval_env)
-
-                    # online perform update once we have some amount of online trajs
                     batch = next(replay_buffer_iterator)
-                    update_info = agent.update(batch)
-
-                    pbar.update()
+                    clock['update'] = agent.update(batch)
                     i += 1
-                        
-
-                    if i % variant.log_interval == 0:
-                        update_info = {k: jax.device_get(v) for k, v in update_info.items()}
-                        for k, v in update_info.items():
-                            if v.ndim == 0:
-                                wandb_logger.log({f'training/{k}': v}, step=i)
-                            elif v.ndim <= 2:
-                                wandb_logger.log_histogram(f'training/{k}', v, i)
-                        wandb_logger.log({
-                            'replay_buffer_size': len(online_replay_buffer),
-                            'episode_return (exploration)': traj['episode_return'],
-                            'is_success (exploration)': int(traj['is_success']),
-                        }, i)
-
-                    if i % variant.eval_interval == 0:
-                        wandb_logger.log({'num_online_samples': len(online_replay_buffer)}, step=i)
-                        wandb_logger.log({'num_online_trajs': traj_id + 1}, step=i)
-                        wandb_logger.log({'env_steps': total_env_steps}, step=i)
-                        if perform_control_evals:
-                            perform_control_eval(agent, eval_env, i, variant, wandb_logger, agent_dp, latent_model=latent_model)
-                        if hasattr(agent, 'perform_eval'):
-                            agent.perform_eval(variant, i, wandb_logger, replay_buffer, replay_buffer_iterator, eval_env)
-
                     if variant.checkpoint_interval != -1 and i % variant.checkpoint_interval == 0:
                         agent.save_checkpoint(variant.outputdir, i, variant.checkpoint_interval)
+                # Same env step as this episode, still uncommitted, so this merges
+                # rather than logging a second time at a step wandb already has.
+                fresh = training_payload(clock['update'])
+                fresh['gradient_steps'] = i
+                logger.add(clock['env_steps'], fresh)
+        logger.flush()
 
 def add_online_data_to_buffer(variant, traj, online_replay_buffer):
 
@@ -290,7 +338,7 @@ def add_online_data_to_buffer(variant, traj, online_replay_buffer):
         online_replay_buffer.insert(insert_dict)
     online_replay_buffer.increment_traj_counter()
 
-def collect_traj(variant, agent, env, i, agent_dp=None, latent_model=None):
+def collect_traj(variant, agent, env, i, agent_dp=None, latent_model=None, on_env_step=None):
     query_frequency = variant.query_freq
     max_timesteps = variant.max_timesteps
     env_max_reward = variant.env_max_reward
@@ -351,6 +399,10 @@ def collect_traj(variant, agent, env, i, agent_dp=None, latent_model=None):
             
         rewards.append(reward)
         image_list.append(curr_image)
+        # `actions` still holds a[T+1:]. Eval runs here, then the loop continues that chunk.
+        # A False return means the env-step budget is spent, so the rest of the chunk is dropped.
+        if on_env_step is not None and on_env_step() is False:
+            break
         if done:
             break
 
@@ -401,7 +453,7 @@ def collect_traj(variant, agent, env, i, agent_dp=None, latent_model=None):
         'pi0_chunks': pi0_chunks,
     }
 
-def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None, latent_model=None):
+def perform_control_eval(agent, env, i, variant, agent_dp=None, latent_model=None):
     query_frequency = variant.query_freq
     print('query frequency', query_frequency)
     max_timesteps = variant.max_timesteps
@@ -479,18 +531,20 @@ def perform_control_eval(agent, env, i, variant, wandb_logger, agent_dp=None, la
     avg_return = np.mean(episode_returns)
     avg_episode_len = np.mean(episode_lens)
     summary_str = f'\nSuccess rate: {success_rate}\nAverage return: {avg_return}\n\n'
-    wandb_logger.log({'evaluation/avg_return': avg_return}, step=i)
-    wandb_logger.log({'evaluation/success_rate': success_rate}, step=i)
-    wandb_logger.log({'evaluation/avg_episode_len': avg_episode_len}, step=i)
+    log = {
+        'evaluation/avg_return': avg_return,
+        'evaluation/success_rate': success_rate,
+        'evaluation/avg_episode_len': avg_episode_len,
+    }
     for r in range(env_max_reward+1):
         more_or_equal_r = (np.array(highest_rewards) >= r).sum()
         more_or_equal_r_rate = more_or_equal_r / variant.eval_episodes
-        wandb_logger.log({f'evaluation/Reward >= {r}': more_or_equal_r_rate}, step=i)
+        log[f'evaluation/Reward >= {r}'] = more_or_equal_r_rate
         summary_str += f'Reward >= {r}: {more_or_equal_r}/{variant.eval_episodes} = {more_or_equal_r_rate*100}%\n'
 
     print(summary_str)
+    return log
 
-def make_multiple_value_reward_visulizations(agent, variant, i, replay_buffer, wandb_logger):
+def make_multiple_value_reward_visulizations(agent, variant, replay_buffer):
     trajs = replay_buffer.get_random_trajs(3)
-    images = agent.make_value_reward_visulization(variant, trajs)
-    wandb_logger.log({'reward_value_images': wandb.Image(images)}, step=i)
+    return agent.make_value_reward_visulization(variant, trajs)
