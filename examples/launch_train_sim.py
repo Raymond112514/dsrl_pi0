@@ -30,26 +30,12 @@ if __name__ == '__main__':
     parser.add_argument('--suffix', default='', help='suffix to use for wandb')
     parser.add_argument('--multi_grad_step', default=1, help='Number of graident steps to take per environment step, aka UTD', type=int)
     parser.add_argument('--resize_image', default=-1, help='the size of image if need resizing', type=int)
-    parser.add_argument(
-        '--query_freq',
-        default=-1,
-        help='Replan interval and SAC residual horizon. Uses the first query_freq steps of the base policy chunk. Defaults to the base policy action_horizon.',
-        type=int,
-    )
+    parser.add_argument('--query_freq', default=-1, help='Replan interval and SAC residual horizon. Uses the first query_freq steps of the base policy chunk. Defaults to the base policy action_horizon.', type=int)
     parser.add_argument('--task_id', default=44, help='task id', type=int)
     parser.add_argument('--output_dir', default='', help='Base directory for experiment outputs')
     parser.add_argument('--pi0_checkpoint', default='', help='Local pi0 checkpoint directory; download default if unset or missing')
-    parser.add_argument(
-        '--act_checkpoint',
-        default='lerobot/act_aloha_sim_insertion_human',
-        help='LeRobot ACT repo id or local path for aloha_insertion',
-    )
     parser.add_argument('--residual_scale', type=float, default=0.01, help='Scale factor for residual actions')
-    parser.add_argument(
-        '--collect_with_residual',
-        action='store_true',
-        help='Apply SAC residual during rollout collection from the first trajectory',
-    )
+    parser.add_argument('--collect_warmup_with_noise', action='store_true', help='Add uniform noise in the range [-residual_scale, residual_scale] to the base actions during warmup rollouts')
     parser.add_argument('--warmup_rollouts', default=20, type=int, help='Rollouts before latent fit and SAC updates')
     latent_rl.add_args(parser)
 

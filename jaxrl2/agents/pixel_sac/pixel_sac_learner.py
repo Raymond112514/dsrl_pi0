@@ -40,7 +40,7 @@ class TrainState(train_state.TrainState):
 
 @functools.partial(jax.jit, static_argnames=(
     'critic_reduction', 'color_jitter', 'aug_next', 'num_cameras',
-    'q_on_full_actions', 'jax_decode',
+    'jax_decode',
 ))
 def _update_jit(
     rng: PRNGKey, actor: TrainState, critic: TrainState,
@@ -48,7 +48,6 @@ def _update_jit(
     discount: float, tau: float, target_entropy: float,
     critic_reduction: str, color_jitter: bool, aug_next: bool, num_cameras: int,
     residual_scale: float,
-    q_on_full_actions: bool,
     jax_decode=None,
 ) -> Tuple[PRNGKey, TrainState, TrainState, Params, TrainState, Dict[str,float]]:
     aug_pixels = batch['observations']['pixels']
@@ -89,7 +88,6 @@ def _update_jit(
         key, actor, critic, target_critic, temp, batch, discount,
         critic_reduction=critic_reduction,
         residual_scale=residual_scale,
-        q_on_full_actions=q_on_full_actions,
         jax_decode=jax_decode,
     )
     new_target_critic_params = soft_target_update(new_critic.params, target_critic_params, tau)
@@ -98,7 +96,6 @@ def _update_jit(
     new_actor, actor_info = update_actor(
         key, actor, new_critic, temp, batch, critic_reduction=critic_reduction,
         residual_scale=residual_scale,
-        q_on_full_actions=q_on_full_actions,
         jax_decode=jax_decode,
     )
     new_temp, alpha_info = update_temperature(temp, actor_info['entropy'], target_entropy)
@@ -144,7 +141,6 @@ class PixelSACLearner(Agent):
                  zero_init_actor_mean: bool = False,
                  critic_actions: Optional[jnp.ndarray] = None,
                  residual_scale: float = 1.0,
-                 q_on_full_actions: bool = False,
                  ):
         """
         An implementation of the version of Soft-Actor-Critic described in https://arxiv.org/abs/1812.05905
@@ -159,7 +155,6 @@ class PixelSACLearner(Agent):
         critic_init_actions = actions if critic_actions is None else critic_actions
         self.critic_action_dim = int(np.prod(critic_init_actions.shape[-2:]))
         self.residual_scale = float(residual_scale)
-        self.q_on_full_actions = bool(q_on_full_actions)
         self.jax_decode = None
 
         self.tau = tau
@@ -263,11 +258,10 @@ class PixelSACLearner(Agent):
             self.target_entropy = float(target_entropy)
         print(f'target_entropy: {self.target_entropy}')
         print(self.critic_reduction)
-        if self.q_on_full_actions:
-            print(
-                f'Q trained on full actions (actor_dim={self.action_dim}, '
-                f'critic_dim={self.critic_action_dim}, residual_scale={self.residual_scale})'
-            )
+        print(
+            f'Q trained on full actions (actor_dim={self.action_dim}, '
+            f'critic_dim={self.critic_action_dim}, residual_scale={self.residual_scale})'
+        )
 
     def set_latent_model(self, model) -> None:
         """Install a fitted latent model's JAX decode for Q on the played chunk."""
@@ -282,7 +276,7 @@ class PixelSACLearner(Agent):
     def update(self, batch: FrozenDict) -> Dict[str, float]:
         new_rng, new_actor, new_critic, new_target_critic, new_temp, info = _update_jit(
             self._rng, self._actor, self._critic, self._target_critic_params, self._temp, batch, self.discount, self.tau, self.target_entropy, self.critic_reduction, self.color_jitter, self.aug_next, self.num_cameras,
-            self.residual_scale, self.q_on_full_actions, self.jax_decode,
+            self.residual_scale, self.jax_decode,
             )
 
         self._rng = new_rng

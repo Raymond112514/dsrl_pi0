@@ -10,7 +10,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=60G
 #SBATCH --time=48:00:00
-#SBATCH --array=0-1
+#SBATCH --array=0-3
 #SBATCH --output=/global/home/users/r112358/logs/%x_%A_%a.out
 #SBATCH --error=/global/home/users/r112358/logs/%x_%A_%a.err
 #SBATCH --exclude=n0139.savio4,n0141.savio4,n0142.savio4
@@ -18,10 +18,10 @@
 # Aloha cube PCA residual SAC.
 #   query_freq = 20, K = 8, residual_scale = 0.2, UTD = 10
 #   seeds 10, 101, 10001, 1000001
-# One array task is one node: two seeds in parallel on the allocated GPU.
-#   0  seeds 10, 101
-#   1  seeds 10001, 1000001
-# 2 nodes, 4 runs. W&B project aloha_pca_qf20.
+# One array task is one node and one seed.
+#   0-3  seeds 10, 101, 10001, 1000001
+# 4 nodes, 4 runs. W&B project aloha_cube_debug.
+# The W&B name omits the seed so the four seeds group together.
 #
 #   bash examples/scripts/submit_aloha_qf20_sweeps.sh
 
@@ -70,14 +70,13 @@ UTD=10
 PCA_K=8
 
 g=${SLURM_ARRAY_TASK_ID}
-if (( g >= 2 )); then
+if (( g >= ${#SEEDS[@]} )); then
   echo "Array index ${g} has no config."
   exit 1
 fi
 
-SEED0=${SEEDS[$((g * 2))]}
-SEED1=${SEEDS[$((g * 2 + 1))]}
-proj_name=aloha_pca_qf20
+SEED=${SEEDS[$g]}
+proj_name=aloha_cube_debug
 
 export DISPLAY=:0
 export MUJOCO_GL=egl
@@ -88,11 +87,12 @@ export MUJOCO_EGL_DEVICE_ID="${ALLOC_GPU}"
 export OPENPI_DATA_HOME="${SCRATCH_CKPT_ROOT}"
 export EXP=./logs/${proj_name}
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
-export XLA_PYTHON_CLIENT_MEM_FRACTION=0.40
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
+export WANDB_X_SERVICE_WAIT=300
 
 echo "branch=$(git rev-parse --abbrev-ref HEAD) $(git rev-parse --short HEAD)"
 echo "Array ${g}: pca query_freq=${QF} K=${PCA_K} residual_scale=${RS} utd=${UTD}"
-echo "  seeds=${SEED0} ${SEED1}"
+echo "  seed=${SEED}"
 echo "  cuda=${CUDA_VISIBLE_DEVICES:-unset}  egl=${MUJOCO_EGL_DEVICE_ID}"
 echo "  pi0_checkpoint=${PI0_CKPT}"
 
@@ -103,13 +103,13 @@ fi
 
 run_seed () {
   local seed=$1
-  local run_name="aloha_pca_qf${QF}_K${PCA_K}_rs${RS}_utd${UTD}_seed${seed}"
-  echo "Launching ${run_name}"
+  local run_name="aloha_pca_qf${QF}_K${PCA_K}_rs${RS}_utd${UTD}"
+  echo "Launching ${run_name} seed=${seed}"
   "${DSRL_PY}" examples/launch_train_sim.py \
     --algorithm pixel_sac \
     --env aloha_cube \
     --prefix "${run_name}" \
-    --launch_group_id aloha_pca_qf20 \
+    --launch_group_id "${run_name}" \
     --wandb_project "${proj_name}" \
     --batch_size 256 \
     --discount 0.999 \
@@ -129,16 +129,8 @@ run_seed () {
     --pca_k "${PCA_K}" \
     --warmup_rollouts 20 \
     --pi0_checkpoint "${PI0_CKPT}" \
-    --output_dir "${EXP}/${run_name}"
+    --output_dir "${EXP}/${run_name}_seed${seed}"
 }
 
-run_seed "${SEED0}" &
-pid0=$!
-run_seed "${SEED1}" &
-pid1=$!
-
-status=0
-wait "${pid0}" || status=1
-wait "${pid1}" || status=1
-echo "Completed array ${g}: pca K=${PCA_K} seeds=${SEED0},${SEED1}"
-exit "${status}"
+run_seed "${SEED}"
+echo "Completed array ${g}: pca K=${PCA_K} seed=${SEED}"

@@ -5,7 +5,7 @@ import jax
 import jax.numpy as jnp
 from flax.training.train_state import TrainState
 
-from jaxrl2.agents.pixel_sac.action_transform import maybe_residual_to_full_actions
+from jaxrl2.agents.pixel_sac.action_transform import actions_for_q
 from jaxrl2.data.dataset import DatasetDict
 from jaxrl2.types import Params, PRNGKey
 
@@ -13,7 +13,6 @@ from jaxrl2.types import Params, PRNGKey
 def update_actor(key: PRNGKey, actor: TrainState, critic: TrainState,
                  temp: TrainState, batch: DatasetDict, cross_norm:bool=False, critic_reduction:str='min',
                  residual_scale: float = 1.0,
-                 q_on_full_actions: bool = False,
                  jax_decode=None) -> Tuple[TrainState, Dict[str, float]]:
     
     key, key_act = jax.random.split(key, num=2)
@@ -41,11 +40,10 @@ def update_actor(key: PRNGKey, actor: TrainState, critic: TrainState,
 
         
         actions, log_probs = dist.sample_and_log_prob(seed=key_act)
-        actions = maybe_residual_to_full_actions(
+        actions = actions_for_q(
             actions,
             batch['observations'],
             residual_scale,
-            q_on_full_actions,
             jax_decode=jax_decode,
         )
 

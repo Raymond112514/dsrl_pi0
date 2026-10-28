@@ -74,10 +74,10 @@ class DummyEnv(gym.ObservationWrapper):
         if variant.add_states:
             if variant.env == 'libero':
                 state_dim = 8
-            elif variant.env in ('aloha_cube', 'aloha_insertion'):
+            elif variant.env == 'aloha_cube':
                 state_dim = 14
             obs_dict['state'] = Box(low=-1.0, high=1.0, shape=(state_dim, 1), dtype=np.float32)
-        if variant.env in ('libero', 'aloha_cube', 'aloha_insertion'):
+        if variant.env in ('libero', 'aloha_cube'):
             residual_dim = variant.query_freq * variant.env_action_dim
             obs_dict['action_diffusion'] = Box(
                 low=-np.inf, high=np.inf, shape=(residual_dim, 1), dtype=np.float32
@@ -164,19 +164,6 @@ def main(variant):
         eval_env = copy.deepcopy(env)
         variant.env_max_reward = 4
         variant.max_timesteps = 400
-    elif variant.env == 'aloha_insertion':
-        from gymnasium.envs.registration import register
-        register(
-            id="gym_aloha/AlohaInsertion-v0",
-            entry_point="gym_aloha.env:AlohaEnv",
-            max_episode_steps=400,
-            nondeterministic=True,
-            kwargs={"obs_type": "pixels", "task": "insertion"},
-        )
-        env = gym.make("gym_aloha/AlohaInsertion-v0", obs_type="pixels_agent_pos", render_mode="rgb_array")
-        eval_env = copy.deepcopy(env)
-        variant.env_max_reward = 4
-        variant.max_timesteps = 400
 
     agent_dp = None
     if variant.env == 'libero':
@@ -193,12 +180,6 @@ def main(variant):
         )
         variant.pi0_action_horizon = config.model.action_horizon
         variant.pi0_action_dim = config.model.action_dim
-    elif variant.env == 'aloha_insertion':
-        from examples.act_insertion_policy import ActInsertionPolicy
-        agent_dp = ActInsertionPolicy(getattr(variant, 'act_checkpoint', None) or "lerobot/act_aloha_sim_insertion_human")
-        variant.pi0_action_horizon = agent_dp.action_horizon
-        variant.pi0_action_dim = agent_dp.action_dim
-        print(f"Loaded ACT insertion policy from {agent_dp.repo_id}")
     else:
         raise NotImplementedError()
     if variant.query_freq <= 0:
@@ -210,7 +191,7 @@ def main(variant):
         )
     if variant.env == 'libero':
         variant.env_action_dim = 7
-    elif variant.env in ('aloha_cube', 'aloha_insertion'):
+    elif variant.env == 'aloha_cube':
         variant.env_action_dim = 14
     if not hasattr(variant, 'residual_scale') or variant.residual_scale is None:
         variant.residual_scale = 0.01
@@ -243,15 +224,13 @@ def main(variant):
     print('sample action shape', sample_action.shape)
     print('sample full action shape', sample_full_action.shape)
 
-    q_on_full_actions = variant.env in ('libero', 'aloha_cube', 'aloha_insertion')
     agent = PixelSACLearner(
         variant.seed,
         sample_obs,
         sample_action,
-        zero_init_actor_mean=variant.env in ('libero', 'aloha_cube', 'aloha_insertion'),
+        zero_init_actor_mean=variant.env in ('libero', 'aloha_cube'),
         critic_actions=sample_full_action,
         residual_scale=getattr(variant, 'residual_scale', 1.0),
-        q_on_full_actions=q_on_full_actions,
         **kwargs,
     )
 

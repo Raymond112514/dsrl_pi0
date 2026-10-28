@@ -23,14 +23,14 @@ def residual_to_full_actions(
     return jnp.reshape(a_full, (batch_size, 1, -1))
 
 
-def maybe_residual_to_full_actions(
+def actions_for_q(
     residual_actions,
     observations,
     residual_scale,
-    q_on_full_actions: bool,
     jax_decode=None,
 ):
-    if not q_on_full_actions:
+    """Q always scores the executed chunk when a base chunk is in the observation."""
+    if 'action_diffusion' not in observations:
         return residual_actions
     return residual_to_full_actions(
         residual_actions,

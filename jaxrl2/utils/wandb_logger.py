@@ -99,12 +99,16 @@ class WandBLogger(object):
             except:
                 print('wandb_config.py not found, using default wandb config')
             os.environ["WANDB_MODE"] = "run"
+            os.environ["WANDB_X_SERVICE_WAIT"] = os.environ.get("WANDB_X_SERVICE_WAIT", "300")
             wandb.init(
                 config=variant,
                 project=project,
                 dir=output_dir,
                 name=experiment_id,
-                settings=wandb.Settings(start_method="thread"),
+                settings=wandb.Settings(
+                    start_method="thread",
+                    x_service_wait=float(os.environ["WANDB_X_SERVICE_WAIT"]),
+                ),
                 group=group_name,
                 entity=team
             )
