@@ -237,6 +237,7 @@ def trajwise_alternating_training_loop(variant, agent, env, eval_env, online_rep
             payload.update(perform_control_eval(
                 agent, eval_env, i, variant, agent_dp, latent_model=latent_model,
             ))
+            payload['evaluation/gradient_steps'] = i
             if replay_buffer._traj_counter > 0 and hasattr(agent, 'perform_eval'):
                 images = make_multiple_value_reward_visulizations(agent, variant, replay_buffer)
                 payload['reward_value_images'] = wandb.Image(images)

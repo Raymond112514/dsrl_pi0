@@ -145,7 +145,7 @@ def main(variant):
         task_id = variant.task_id
         task = task_suite.get_task(task_id)
         env, task_description = _get_libero_env(task, 256, variant.seed)
-        eval_env = env
+        eval_env, _ = _get_libero_env(task, 256, variant.seed)
         variant.task_description = task_description
         variant.env_max_reward = 1
         variant.max_timesteps = 400
